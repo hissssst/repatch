@@ -4,11 +4,52 @@ defmodule Repatch.MixProject do
   def project do
     [
       app: :repatch,
-      version: "0.0.1",
-      elixir: "~> 1.16",
+      version: version(),
+      elixir: "~> 1.12",
       elixirc_paths: elixirc_paths(),
+      name: "Repatch",
+      description: description(),
+      package: package(),
       start_permanent: Mix.env() == :prod,
+      source_url: "https://github.com/hissssst/repatch",
+      docs: docs(),
       deps: deps()
+    ]
+  end
+
+  def version do
+    "0.0.1"
+  end
+
+  def description do
+    "Tool for mocking in tests"
+  end
+
+  defp package do
+    [
+      description: description(),
+      licenses: ["BSD-2-Clause"],
+      files: [
+        "lib",
+        "mix.exs",
+        "README.md",
+        ".formatter.exs"
+      ],
+      maintainers: [
+        "Georgy Sychev"
+      ],
+      links: %{
+        GitHub: "https://github.com/hissssst/repatch",
+        Changelog: "https://github.com/hissssst/repatch/blob/main/CHANGELOG.md"
+      }
+    ]
+  end
+
+  defp docs do
+    [
+      source_ref: version(),
+      main: "readme",
+      extras: ["README.md", "CHANGELOG.md"]
     ]
   end
 
