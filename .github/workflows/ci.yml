@@ -1,0 +1,60 @@
+name: CI Workflow
+
+on:
+  pull_request:
+    branches: [ master ]
+  push:
+    branches: [ master ]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        otp-version: ['26']
+        elixir-version: ['1.14', '1.15', '1.16']
+    name: CI
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Setup Erlang and Elixir
+      uses: erlef/setup-beam@v1
+      id: setup-beam
+      with:
+        otp-version: ${{ matrix.otp-version }}
+        elixir-version: ${{ matrix.elixir-version }}
+
+    - name: Restore dependencies and _build
+      uses: actions/cache/restore@v3
+      with:
+        key: mix-${{ steps.setup-beam.outputs.otp-version }}-${{ steps.setup-beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+        path: |
+          _build
+          deps
+        restore-keys: |
+          mix-${{ steps.setup-beam.outputs.otp-version }}-${{ steps.setup-beam.outputs.elixir-version }}-
+          mix-${{ steps.setup-beam.outputs.otp-version }}-
+          mix-
+
+    - name: Download and compile dependencies
+      run: |
+        mix deps.get
+        mix deps.compile
+
+    - name: Check formatting and compile
+      run: |
+        mix compile --warnings-as-errors
+
+    - name: Cache dependencies and _build
+      uses: actions/cache/save@v3
+      with:
+        key: mix-${{ steps.setup-beam.outputs.otp-version }}-${{ steps.setup-beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+        path: |
+          _build
+          deps
+
+    - name: Run tests
+      run: |
+        mix test
