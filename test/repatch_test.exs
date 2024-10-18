@@ -42,10 +42,16 @@ defmodule RepatchTest do
     Repatch.patch(Keyword, :new, [ignore_forbidden_module: true], fn -> [] end)
   end
 
+  test "patching generated fails" do
+    assert_raise ArgumentError, fn ->
+      Repatch.patch(X, :__f_repatch, fn x -> x - 1 end)
+    end
+  end
+
   test "patching patched fails" do
     Repatch.patch(X, :f, fn x -> x - 1 end)
 
-    assert_raise ArgumentError, fn ->
+    assert_raise ArgumentError, "Function X.f/1 is already patched", fn ->
       Repatch.patch(X, :f, fn x -> x - 2 end)
     end
   end
@@ -80,6 +86,16 @@ defmodule RepatchTest do
     assert_all([2, 2, 2, 10])
   end
 
+  test "restoring local just works" do
+    assert_all()
+
+    Repatch.patch(X, :f, fn x -> x - 1 end)
+    assert_all([0, 0, 3, 10])
+
+    Repatch.restore(X, :f, 1)
+    assert_all()
+  end
+
   test "real just works" do
     assert_all()
 
@@ -98,6 +114,18 @@ defmodule RepatchTest do
 
         def f(x) do
           Repatch.real(x + 123)
+        end
+      end
+    end
+  end
+
+  test "real fails on repatch-generated" do
+    assert_raise CompileError, fn ->
+      defmodule M do
+        require Repatch
+
+        def f(x) do
+          Repatch.real(X.__f_repatch(1))
         end
       end
     end
@@ -126,6 +154,68 @@ defmodule RepatchTest do
         end
       end
     end
+  end
+
+  test "super fails on repatch-generated" do
+    assert_raise CompileError, fn ->
+      defmodule M do
+        require Repatch
+
+        def f(x) do
+          Repatch.super(X.__f_repatch(1))
+        end
+      end
+    end
+  end
+
+  test "private just works" do
+    assert X.public(1) == 3
+
+    assert_raise UndefinedFunctionError, fn ->
+      apply(X, :private, [1])
+    end
+
+    Repatch.patch(X, :private, fn x -> x - 1 end)
+
+    assert X.public(1) == 1
+    assert Repatch.private(X.private(1)) == 0
+  end
+
+  test "private fails on non-calls works" do
+    assert_raise CompileError, fn ->
+      defmodule M do
+        require Repatch
+
+        def f(x) do
+          Repatch.private(x + 123)
+        end
+      end
+    end
+  end
+
+  test "private fails on repatch-generated" do
+    assert_raise CompileError, fn ->
+      defmodule M do
+        require Repatch
+
+        def f(x) do
+          Repatch.private(X.__f_repatch(1))
+        end
+      end
+    end
+  end
+
+  test "super in private works" do
+    assert X.public(1) == 3
+
+    assert_raise UndefinedFunctionError, fn ->
+      apply(X, :private, [1])
+    end
+
+    Repatch.patch(X, :private, fn x -> Repatch.super(X.private(x)) - 2 end)
+
+    assert X.public(1) == 1
+    assert Repatch.private(X.private(1)) == 0
   end
 
   test "repatched? just works" do

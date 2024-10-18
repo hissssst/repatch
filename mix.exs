@@ -1,6 +1,14 @@
 defmodule Repatch.MixProject do
   use Mix.Project
 
+  def version do
+    "0.0.1"
+  end
+
+  def description do
+    "Tool for mocking in tests"
+  end
+
   def project do
     [
       app: :repatch,
@@ -17,12 +25,8 @@ defmodule Repatch.MixProject do
     ]
   end
 
-  def version do
-    "0.0.1"
-  end
-
-  def description do
-    "Tool for mocking in tests"
+  def application do
+    []
   end
 
   defp package do
@@ -49,12 +53,15 @@ defmodule Repatch.MixProject do
     [
       source_ref: version(),
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md"]
+      extras: ["README.md", "CHANGELOG.md"],
+      groups_for_extras: groups_for_extras()
     ]
   end
 
-  def application do
-    []
+  defp groups_for_extras do
+    [
+      Pages: ~r(pages/.*)
+    ]
   end
 
   defp deps do

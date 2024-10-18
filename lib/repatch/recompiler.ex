@@ -12,24 +12,29 @@ defmodule Repatch.Recompiler do
       {:ok, bin} <- binary(module),
       {:ok, forms} <- abstract_forms(bin)
     ) do
-      forms = reload(forms, module, [])
+      forms = reload(forms, module)
 
       :code.purge(module)
       :code.delete(module)
 
-      :ok = compile(forms)
+      with :ok <- compile(forms) do
+        if sticky do
+          :code.stick_mod(module)
+        end
 
-      if sticky do
-        :code.stick_mod(module)
+        {:ok, bin}
       end
-
-      {:ok, bin}
     end
   end
 
   @spec super_name(String.Chars.t()) :: atom()
   def super_name(function) do
     :"__#{function}_repatch"
+  end
+
+  @spec private_name(String.Chars.t()) :: atom()
+  def private_name(function) do
+    :"__#{function}_repatch_private_repatch"
   end
 
   @spec load_binary(module(), binary()) :: :ok | {:error, any()}
@@ -73,8 +78,8 @@ defmodule Repatch.Recompiler do
     end
   end
 
-  defp reload(abstract_forms, module, exports) do
-    traverse(abstract_forms, exports, module)
+  defp reload(abstract_forms, module) do
+    traverse(abstract_forms, [], module, [])
   end
 
   defp compile(abstract_forms, compiler_options \\ []) do
@@ -90,16 +95,11 @@ defmodule Repatch.Recompiler do
     end
   end
 
-  defp traverse([head | tail], exports, module) do
+  defp traverse([head | tail], exports, module, acc) do
     case head do
-      {:attribute, _, :module, _} = form ->
-        [form | traverse(tail, exports, module)]
-
       {:attribute, _, :export, old_exports} ->
-        exports = Enum.uniq(old_exports ++ exports)
-
         exports_and_supers =
-          Enum.flat_map(exports, fn
+          Enum.flat_map(old_exports, fn
             x when x in [__info__: 1, module_info: 0, module_info: 1] ->
               [x]
 
@@ -110,35 +110,53 @@ defmodule Repatch.Recompiler do
               ]
           end)
 
-        form = {:attribute, @generated, :export, exports_and_supers}
-        [form | traverse(tail, exports, module)]
+        traverse(tail, exports ++ exports_and_supers, module, acc)
 
       {:attribute, anno, :compile, options} ->
         case filter_compile_options(options) do
           [] ->
-            traverse(tail, exports, module)
+            traverse(tail, exports, module, acc)
 
           options ->
             form = {:attribute, anno, :compile, options}
-            [form | traverse(tail, exports, module)]
+            traverse(tail, exports, module, [form | acc])
         end
 
       {:function, _, name, _, _} = function when name in ~w[__info__ module_info]a ->
-        [function | traverse(tail, exports, module)]
+        traverse(tail, exports, module, [function | acc])
 
-      {:function, _, _, _, _} = function ->
-        function(module, function) ++ traverse(tail, exports, module)
+      {:function, anno, name, arity, clauses} ->
+        if {name, arity} in exports do
+          old_name = super_name(name)
+          exports = [{old_name, arity} | exports]
+          acc = function(module, anno, name, old_name, arity, clauses) ++ acc
+          traverse(tail, exports, module, acc)
+        else
+          old_name = super_name(name)
+          private_name = private_name(name)
+          exports = [{old_name, arity}, {private_name, arity} | exports]
+
+          acc =
+            private_function(module, anno, name, old_name, private_name, arity, clauses) ++ acc
+
+          traverse(tail, exports, module, acc)
+        end
 
       _ ->
-        traverse(tail, exports, module)
+        traverse(tail, exports, module, acc)
     end
   end
 
-  defp traverse([], _exports, _module), do: []
+  defp traverse([], exports, module, acc) do
+    exports = Enum.uniq(exports)
 
-  defp function(module, {:function, anno, name, arity, old_clauses}) do
-    old_name = super_name(name)
+    [
+      {:attribute, @generated, :module, module},
+      {:attribute, @generated, :export, exports} | Enum.reverse(acc)
+    ]
+  end
 
+  defp function(module, anno, name, old_name, arity, old_clauses) do
     clause = {
       :clause,
       @generated,
@@ -150,6 +168,30 @@ defmodule Repatch.Recompiler do
     new = {:function, @generated, name, arity, [clause]}
     old = {:function, anno, old_name, arity, old_clauses}
     [new, old]
+  end
+
+  defp private_function(module, anno, name, old_name, private_name, arity, old_clauses) do
+    clause = {
+      :clause,
+      @generated,
+      patterns(arity),
+      [],
+      body(module, name, arity, old_name)
+    }
+
+    private_clause = {
+      :clause,
+      @generated,
+      patterns(arity),
+      [],
+      [{:call, @generated, {:atom, @generated, name}, patterns(arity)}]
+    }
+
+    new = {:function, @generated, name, arity, [clause]}
+    private = {:function, @generated, private_name, arity, [private_clause]}
+    old = {:function, anno, old_name, arity, old_clauses}
+
+    [new, private, old]
   end
 
   defp patterns(0) do

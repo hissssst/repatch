@@ -1,6 +1,13 @@
 defmodule Repatch.ExUnit do
   @moduledoc """
-  Just `use Repatch.ExUnit` and you're ready for testing with `Repatch`.
+  An `ExUnit`-friendly helper to be used in testing. Just add
+
+  ```elixir
+  use Repatch.ExUnit
+  ```
+
+  Somewhere after the `use ExUnit.Case` line and this helper will setup
+  cleaning of `Repatch` state
   """
 
   defmacro __using__(_opts \\ []) do

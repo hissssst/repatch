@@ -16,4 +16,12 @@ defmodule X do
   def ff(x) do
     f(x)
   end
+
+  defp private(x) do
+    x + 1
+  end
+
+  def public(x) do
+    private(x) + 1
+  end
 end

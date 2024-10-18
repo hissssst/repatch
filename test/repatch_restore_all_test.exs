@@ -2,6 +2,7 @@ defmodule RepatchRestoreAllTest do
   use ExUnit.Case, async: false
 
   test "restore_all just works" do
+    Repatch.spy(X)
     assert X.f(1) == 2
     assert Repatch.called?(X, :f, 1, exactly: :once)
 
