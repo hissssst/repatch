@@ -3,6 +3,7 @@ defmodule RepatchGlobalTest do
   use Repatch.ExUnit
 
   alias Repatch.Looper
+  require X
 
   test "global works" do
     p = Looper.start_link()

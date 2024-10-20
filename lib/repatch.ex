@@ -19,14 +19,19 @@ defmodule Repatch do
     :persistent_term
   ]
 
+  # Macro for debugging. It is designed to be thin, because we want to keep repatch
+  # runtime overhead as thin as possible and Logger or anything with runtime check
+  # is a bad fit here
+
   if false do
     defmacrop debug(message) do
       quote do
         IO.puts("#{inspect(self())} | #{unquote(message)}")
+        []
       end
     end
   else
-    defmacrop debug(_), do: nil
+    defmacrop debug(_), do: []
   end
 
   @typedoc """
@@ -108,7 +113,7 @@ defmodule Repatch do
     end
 
     for module <- List.wrap(Keyword.get(opts, :recompile, [])) do
-      recompile(module, opts)
+      spawn_link(fn -> recompile(module, opts) end)
     end
 
     debug("setup successful")
@@ -142,9 +147,22 @@ defmodule Repatch do
 
       [] ->
         if :ets.insert_new(:repatch_module_states, {module, :recompiling}) do
-          {:ok, bin} = Recompiler.recompile(module)
-          :ets.insert(:repatch_module_states, {module, {:recompiled, bin}})
-          debug("Recompiled #{inspect(module)}")
+          case Recompiler.recompile(module) do
+            {:ok, bin} ->
+              :ets.insert(:repatch_module_states, {module, {:recompiled, bin}})
+              debug("Recompiled #{inspect(module)}")
+
+            {:error, :nofile} ->
+              raise ArgumentError, "Module #{inspect(module)} does not exist"
+
+            {:error, :binary_unavailable} ->
+              raise ArgumentError, "Binary for module #{inspect(module)} is unavailable"
+
+            {:error, {:abstract_forms_unavailable, _}} ->
+              raise ArgumentError,
+                    "Abstract forms for module #{inspect(module)} are unavailable. " <>
+                      "Please make sure that your modules are compiled with debug info"
+          end
         else
           await_recompilation(module)
         end
@@ -290,11 +308,9 @@ defmodule Repatch do
   end
 
   defp maybe_raise_repatch_generated(function, caller, name) do
-    function_name = Atom.to_string(function)
-
-    if String.starts_with?(function_name, "__") and String.ends_with?(function_name, "_repatch") do
+    if Recompiler.generated?(function) do
       raise CompileError,
-        description: "Can't call #{name}/1 on Repatch-generated functions",
+        description: "Can't call #{name}/1 on Repatch-generated functions. Got #{function}",
         line: caller.line,
         file: caller.file
     end
@@ -382,17 +398,40 @@ defmodule Repatch do
       |> :erlang.fun_info()
       |> Keyword.fetch!(:arity)
 
-    unless {Recompiler.super_name(function), arity} in module.module_info(:exports) do
-      raise ArgumentError, "Function #{inspect(module)}.#{function}/#{arity} does not exist"
+    case extract_export_type(module, function, arity) do
+      :macro ->
+        hook = prepare_hook(module, function, arity, func)
+        add_hook(module, :"MACRO-#{function}", arity, hook, opts)
+        debug("Added #{mode} macro hook")
+
+      :function ->
+        hook = prepare_hook(module, function, arity, func)
+        add_hook(module, function, arity, hook, opts)
+        debug("Added #{mode} function hook")
+
+      nil ->
+        raise ArgumentError, "Function #{inspect(module)}.#{function}/#{arity} does not exist"
     end
 
-    hook = prepare_hook(module, function, arity, func)
-
-    add_hook(module, function, arity, hook, opts)
-
-    debug("Added #{mode} hook")
-
     :ok
+  end
+
+  defp extract_export_type(module, function, arity) do
+    macro_name = "MACRO-#{function}"
+    super_name = Recompiler.super_name_string(function)
+
+    Enum.find_value(module.module_info(:exports), fn {function, function_arity} ->
+      case Atom.to_string(function) do
+        ^macro_name when function_arity == arity ->
+          :macro
+
+        ^super_name when function_arity == arity ->
+          :function
+
+        _ ->
+          false
+      end
+    end)
   end
 
   defp add_hook(module, function, arity, hook, opts) do

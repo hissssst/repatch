@@ -1,10 +1,10 @@
 defmodule RepatchTest do
   use ExUnit.Case, async: true
 
-  alias Repatch.Looper
+  require X
   require Repatch
 
-  # setup do: on_exit(&Repatch.cleanup/0)
+  alias Repatch.Looper
 
   defmacrop assert_all(results \\ [2, 2, 3, 10]) do
     [a, b, c, d] = results
@@ -125,7 +125,7 @@ defmodule RepatchTest do
         require Repatch
 
         def f(x) do
-          Repatch.real(X.__f_repatch(1))
+          Repatch.real(X."REPATCH-f"(1))
         end
       end
     end
@@ -162,7 +162,7 @@ defmodule RepatchTest do
         require Repatch
 
         def f(x) do
-          Repatch.super(X.__f_repatch(1))
+          Repatch.super(X."REPATCH-f"(1))
         end
       end
     end
@@ -199,7 +199,7 @@ defmodule RepatchTest do
         require Repatch
 
         def f(x) do
-          Repatch.private(X.__f_repatch(1))
+          Repatch.private(X."REPATCH-f"(1))
         end
       end
     end
@@ -253,5 +253,31 @@ defmodule RepatchTest do
     refute Repatch.called?(X, :f, 1)
     assert Repatch.allowances() == []
     assert_all()
+  end
+
+  test "patching macro works" do
+    assert X.macro(123) == 1230
+
+    Repatch.patch(X, :macro, fn x, _caller -> quote do: unquote(x) / 10 end)
+
+    defmodule YYY do
+      require X
+
+      def f(x) do
+        X.macro(x)
+      end
+    end
+
+    assert YYY.f(123) == 12.3
+  end
+
+  test "sticky module test" do
+    assert :code.is_sticky(:string)
+    assert :string.is_empty("")
+
+    Repatch.patch(:string, :is_empty, fn _ -> "Not even boolean" end)
+
+    assert :code.is_sticky(:string)
+    assert :string.is_empty("") == "Not even boolean"
   end
 end

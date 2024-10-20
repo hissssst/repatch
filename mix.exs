@@ -2,7 +2,7 @@ defmodule Repatch.MixProject do
   use Mix.Project
 
   def version do
-    "0.0.1"
+    "1.0.0"
   end
 
   def description do
@@ -53,14 +53,14 @@ defmodule Repatch.MixProject do
     [
       source_ref: version(),
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md"],
+      extras: ["README.md"] ++ Path.wildcard("pages/*") ++ ["CHANGELOG.md"],
       groups_for_extras: groups_for_extras()
     ]
   end
 
   defp groups_for_extras do
     [
-      Pages: ~r(pages/.*)
+      Learn: ~r(pages/.*)
     ]
   end
 

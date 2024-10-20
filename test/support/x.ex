@@ -24,4 +24,8 @@ defmodule X do
   def public(x) do
     private(x) + 1
   end
+
+  defmacro macro(x) do
+    quote do: unquote(x) * 10
+  end
 end

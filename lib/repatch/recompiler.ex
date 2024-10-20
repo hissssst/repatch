@@ -8,8 +8,9 @@ defmodule Repatch.Recompiler do
   @spec recompile(module()) :: {:ok, binary()} | {:error, any()}
   def recompile(module) do
     with(
-      {:ok, sticky} <- unstick_module(module),
+      {:module, ^module} <- Code.ensure_loaded(module),
       {:ok, bin} <- binary(module),
+      {:ok, compiler_options} <- compiler_options(bin),
       {:ok, forms} <- abstract_forms(bin)
     ) do
       forms = reload(forms, module)
@@ -17,11 +18,7 @@ defmodule Repatch.Recompiler do
       :code.purge(module)
       :code.delete(module)
 
-      with :ok <- compile(forms) do
-        if sticky do
-          :code.stick_mod(module)
-        end
-
+      with :ok <- compile(forms, compiler_options) do
         {:ok, bin}
       end
     end
@@ -29,28 +26,91 @@ defmodule Repatch.Recompiler do
 
   @spec super_name(String.Chars.t()) :: atom()
   def super_name(function) do
-    :"__#{function}_repatch"
+    :"REPATCH-#{function}"
+  end
+
+  @spec super_name_string(String.Chars.t()) :: binary()
+  def super_name_string(function) do
+    "REPATCH-#{function}"
   end
 
   @spec private_name(String.Chars.t()) :: atom()
   def private_name(function) do
-    :"__#{function}_repatch_private_repatch"
+    :"REPATCH-PRIVATE-#{function}"
+  end
+
+  @spec generated?(atom()) :: boolean()
+  def generated?(function) do
+    case :erlang.atom_to_binary(function) do
+      "REPATCH-" <> _ -> true
+      _ -> false
+    end
   end
 
   @spec load_binary(module(), binary()) :: :ok | {:error, any()}
   def load_binary(module, binary) do
-    with {:module, ^module} <- :code.load_binary(module, ~c"", binary) do
-      :ok
+    sticky = unstick_module(module)
+
+    try do
+      with {:module, ^module} <- :code.load_binary(module, ~c"", binary) do
+        :ok
+      end
+    after
+      if sticky do
+        :code.stick_mod(module)
+      end
     end
   end
 
   ## Privates
 
+  defp compiler_options(binary) do
+    case :beam_lib.chunks(binary, [:compile_info]) do
+      {:ok, {_, [compile_info: info]}} ->
+        filtered_options =
+          case Keyword.fetch(info, :options) do
+            {:ok, options} ->
+              filter_compiler_options(options)
+
+            :error ->
+              []
+          end
+
+        {:ok, filtered_options}
+
+      {:error, :beam_lib, details} ->
+        reason = elem(details, 0)
+        {:error, reason}
+
+      _ ->
+        {:error, :compiler_options_unavailable}
+    end
+  end
+
+  defp filter_compiler_options([]), do: []
+
+  defp filter_compiler_options([{:parse_transform, _} | tail]) do
+    filter_compiler_options(tail)
+  end
+
+  defp filter_compiler_options([o | tail]) when o in ~w[
+      from_core makedeps_side_effects
+      warn_missing_doc_function
+      warn_missing_doc_callback
+      warn_missing_spec_documented
+  ]a do
+    filter_compiler_options(tail)
+  end
+
+  defp filter_compiler_options([head | tail]) do
+    [head | filter_compiler_options(tail)]
+  end
+
   defp unstick_module(module) do
     if :code.is_sticky(module) do
-      {:ok, :code.unstick_mod(module)}
+      :code.unstick_mod(module)
     else
-      {:ok, false}
+      false
     end
   end
 
@@ -60,11 +120,10 @@ defmodule Repatch.Recompiler do
         {:ok, abstract_forms}
 
       {:error, :beam_lib, details} ->
-        reason = elem(details, 0)
-        {:error, reason}
+        {:error, {:abstract_forms_unavailable, details}}
 
       _ ->
-        {:error, :abstract_forms_unavailable}
+        {:error, {:abstract_forms_unavailable, []}}
     end
   end
 
@@ -78,12 +137,10 @@ defmodule Repatch.Recompiler do
     end
   end
 
-  defp reload(abstract_forms, module) do
-    traverse(abstract_forms, [], module, [])
-  end
+  defp compile(abstract_forms, compiler_options) do
+    options = Enum.uniq([:return_errors, :debug_info | compiler_options])
 
-  defp compile(abstract_forms, compiler_options \\ []) do
-    case :compile.forms(abstract_forms, [:return_errors | compiler_options]) do
+    case :compile.forms(abstract_forms, options) do
       {:ok, module, binary} ->
         load_binary(module, binary)
 
@@ -93,6 +150,10 @@ defmodule Repatch.Recompiler do
       errors ->
         {:error, {:abstract_forms_invalid, abstract_forms, errors}}
     end
+  end
+
+  defp reload(abstract_forms, module) do
+    traverse(abstract_forms, [], module, [])
   end
 
   defp traverse([head | tail], exports, module, acc) do
@@ -121,6 +182,9 @@ defmodule Repatch.Recompiler do
             form = {:attribute, anno, :compile, options}
             traverse(tail, exports, module, [form | acc])
         end
+
+      {:attribute, _anno, :import, _} = keep ->
+        traverse(tail, exports, module, [keep | acc])
 
       {:function, _, name, _, _} = function when name in ~w[__info__ module_info]a ->
         traverse(tail, exports, module, [function | acc])

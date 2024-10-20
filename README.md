@@ -6,19 +6,17 @@ Repatch is a library for efficient, ergonomic and concise mocking/patching in te
 
 ## Features
 
-1. Patch **any** function or macro. You can even patch and call private functions in test
+1. Patch **any** function or macro (except NIF and BIF). You can even patch and call private functions in test, or Erlang modules
 
 2. Designed to work with `async: true`. Has 3 isolation levels for testing multi-processes scenarios.
 
 3. Does not require any explicit boilerplate or DI. Though, you are completely free to use it with Repatch!
 
-4. Faster that any other mocking/patching tool.
-
-5. Call history tracking.
+5. Powerful call history tracking.
 
 6. `super` and `real` to help you call real implementations of the module.
 
-7. Works in `iex` and other test runners.
+7. Works with other test frameworks and even in non-testing environments like `iex` or remote shell.
 
 ## Installation
 
