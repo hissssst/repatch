@@ -4,6 +4,8 @@ defmodule RepatchTest do
   require X
   require Repatch
 
+  doctest Repatch, except: [setup: 1, setup: 0, restore_all: 0]
+
   alias Repatch.Looper
 
   defmacrop assert_all(results \\ [2, 2, 3, 10]) do
@@ -258,7 +260,7 @@ defmodule RepatchTest do
   test "patching macro works" do
     assert X.macro(123) == 1230
 
-    Repatch.patch(X, :macro, fn x, _caller -> quote do: unquote(x) / 10 end)
+    Repatch.patch(X, :macro, fn _caller, x -> quote do: unquote(x) / 10 end)
 
     defmodule YYY do
       require X

@@ -28,7 +28,7 @@ one is the most efficient and simple.
 ## Disable history
 
 When module is recompiled, history is enabled for every function in this module. And by default
-history tracks **calls to any function in the module from all processes**. However, it is
+**history tracks calls to any function in the module from all processes**. However, it is
 possible to track calls to the patched function manually.
 
 ### For example
@@ -49,10 +49,14 @@ history = Agent.get(history_agent, &Function.identity/1)
 assert Enum.any?(history, &match?({MapSet, :new, [1 | _], %MapSet{}}, &1))
 ```
 
-## Cleanup 3rd-party processes
+## Cleanup processes
 
 If you're using processes which will outlive the test suite, and these processes call the patched modules, you should call `Repatch.cleanup/1` on them from time to time to clean history.
 
-## Try not to patch Elixir and Erlang kernel functions
+## Try not to patch kernel functions
 
-That means if you have a function which returns result of `Enum.reduce` call, try not
+That means if you have a function which returns result of `Enum.reduce` call, try not to patch it and
+patch the private/public function which calls it. Otherwise, every call to this function will hit disptacher
+and will be slowed down. **This tip is especially useful for recursive functions**.
+
+It also applies to Erlang stdlib functions and modules and frequently called libraries like `:telemetry`

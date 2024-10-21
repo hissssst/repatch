@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0
+
+* Fixed a bug with incorrect ordering of arguments in patch functions
+* Adds `super/3`, `private/3` and `real/3` functions
+
 ## 1.0.0
 
 First stable version, ready for production use.

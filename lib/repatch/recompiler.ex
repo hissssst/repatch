@@ -39,6 +39,11 @@ defmodule Repatch.Recompiler do
     :"REPATCH-PRIVATE-#{function}"
   end
 
+  @spec private_name_string(String.Chars.t()) :: binary()
+  def private_name_string(function) do
+    "REPATCH-PRIVATE-#{function}"
+  end
+
   @spec generated?(atom()) :: boolean()
   def generated?(function) do
     case :erlang.atom_to_binary(function) do
@@ -268,12 +273,12 @@ defmodule Repatch.Recompiler do
     end)
   end
 
-  defp arguments(0) do
+  defp arguments(0, _arity) do
     {nil, @generated}
   end
 
-  defp arguments(arity) do
-    {:cons, @generated, {:var, @generated, :"_arg#{arity}"}, arguments(arity - 1)}
+  defp arguments(i, arity) do
+    {:cons, @generated, {:var, @generated, :"_arg#{arity - i + 1}"}, arguments(i - 1, arity)}
   end
 
   defp body(module, name, arity, old_name) do
@@ -287,7 +292,7 @@ defmodule Repatch.Recompiler do
           {:atom, @generated, module},
           {:atom, @generated, name},
           {:integer, @generated, arity},
-          arguments(arity)
+          arguments(arity, arity)
         ]},
        [
          {:clause, @generated, [{:tuple, @generated, [{:atom, @generated, :ok}, result]}], [],

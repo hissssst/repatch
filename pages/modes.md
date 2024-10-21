@@ -1,6 +1,7 @@
 # Isolation modes
 
-`Repatch` has 3 different isolation modes, and it is important to know when and how to use each one of them
+`Repatch` has 3 different isolation modes for patch isolation
+when testing with `async: true`, and it is important to know when and how to use each one of them.
 
 ## Local mode
 

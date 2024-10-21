@@ -6,24 +6,28 @@ defmodule Repatch do
   """
 
   alias Repatch.Recompiler
+  import :erlang, only: [atom_to_binary: 1]
 
   @forbidden_modules [
-    Keyword,
-    Repatch,
-    Repatch.Recompiler,
-    Repatch.ExUnit,
-    Enum,
-    :erlang,
     :code,
+    :erlang,
     :ets,
-    :persistent_term
+    :persistent_term,
+    Enum,
+    Keyword,
+    Map,
+    Repatch,
+    Repatch.ExUnit,
+    Repatch.Recompiler
   ]
 
   # Macro for debugging. It is designed to be thin, because we want to keep repatch
   # runtime overhead as thin as possible and Logger or anything with runtime check
   # is a bad fit here
 
-  if false do
+  debugging? = false
+
+  if debugging? do
     defmacrop debug(message) do
       quote do
         IO.puts("#{inspect(self())} | #{unquote(message)}")
@@ -64,6 +68,10 @@ defmodule Repatch do
   See `t:setup_option/0` for available options.
 
   It is suggested to be put in the `test_helper.exs` after the `ExUnit.start()` line
+
+  ## Example
+
+      iex> Repatch.setup(enable_shared: false)
   """
   @spec setup([setup_option()]) :: :ok
   def setup(opts \\ []) do
@@ -173,6 +181,18 @@ defmodule Repatch do
   Cleans up current test process (or any other process) Repatch-state.
   It is recommended to be called during the test exit.
   Check out `Repatch.ExUnit` module which set up this callback up.
+
+  ## Example
+
+      iex> Repatch.patch(DateTime, :utc_now, fn -> :ok end)
+      iex> DateTime.utc_now()
+      :ok
+      iex> Repatch.called?(DateTime, :utc_now, 0)
+      true
+      iex> Repatch.cleanup()
+      iex> Repatch.called?(DateTime, :utc_now, 0)
+      false
+      iex> %DateTime{} = DateTime.utc_now()
   """
   @spec cleanup(pid()) :: :ok
   def cleanup(pid \\ self()) do
@@ -212,6 +232,14 @@ defmodule Repatch do
   Clears all state of the `Repatch` including all patches, fakes and history, and reloads all
   old modules back, disabling history collection on them. It is not recommended to be called
   during testing and it is suggested to be used only when Repatch is used in iex session.
+
+  ## Example
+
+      iex> Repatch.patch(DateTime, :utc_now, fn -> :ok end)
+      iex> DateTime.utc_now()
+      :ok
+      iex> Repatch.restore_all()
+      iex> %DateTime{} = DateTime.utc_now()
   """
   @spec restore_all() :: :ok
   def restore_all do
@@ -253,6 +281,16 @@ defmodule Repatch do
   and starts tracking new history of all calls to the specified module.
 
   Be aware that it recompiles the module if it was not patched or spied on before, which may take some time.
+
+  ## Example
+
+      iex> Repatch.spy(DateTime)
+      iex> DateTime.utc_now()
+      iex> Repatch.called?(DateTime, :utc_now, 0)
+      true
+      iex> Repatch.spy(DateTime)
+      iex> Repatch.called?(DateTime, :utc_now, 0)
+      false
   """
   @spec spy(module(), [spy_option()]) :: :ok
   def spy(module, opts \\ []) do
@@ -276,6 +314,20 @@ defmodule Repatch do
   of the `fake_module`.
 
   See `t:fake_option/0` for available options.
+
+  ## Example
+
+      iex> ~U[2024-10-20 13:31:59.342240Z] != DateTime.utc_now()
+      true
+      iex> defmodule FakeDateTime do
+      ...>   def utc_now do
+      ...>     ~U[2024-10-20 13:31:59.342240Z]
+      ...>   end
+      ...> end
+      iex> Repatch.fake(DateTime, FakeDateTime)
+      iex> DateTime.utc_now()
+      iex> ~U[2024-10-20 13:31:59.342240Z] == DateTime.utc_now()
+      true
   """
   @spec fake(module(), module(), [fake_option()]) :: :ok
   def fake(real_module, fake_module, opts \\ [])
@@ -307,18 +359,67 @@ defmodule Repatch do
     end
   end
 
-  defp maybe_raise_repatch_generated(function, caller, name) do
+  defp maybe_raise_repatch_generated(function, env, name) do
     if Recompiler.generated?(function) do
       raise CompileError,
         description: "Can't call #{name}/1 on Repatch-generated functions. Got #{function}",
-        line: caller.line,
-        file: caller.file
+        line: env.line,
+        file: env.file
     end
+  end
+
+  defp maybe_raise_repatch_generated(function, name) do
+    if Recompiler.generated?(function) do
+      raise ArgumentError, "Can't call #{name}/1 on Repatch-generated functions. Got #{function}"
+    end
+  end
+
+  defp maybe_raise_non_existing(module, function, function_string, arity) do
+    exists =
+      Enum.any?(module.module_info(:exports), fn
+        {f, ^arity} -> atom_to_binary(f) == function_string
+        _ -> false
+      end)
+
+    unless exists do
+      raise UndefinedFunctionError,
+        module: module,
+        function: function,
+        arity: arity,
+        message: "Can't find patch"
+    end
+  end
+
+  @doc """
+  Function version of the `real/1` macro. Please prefer to use macro in tests, since
+  it is slightly more efficient
+
+  ## Example
+
+      iex> Repatch.patch(DateTime, :utc_now, fn _calendar -> :repatched end)
+      iex> DateTime.utc_now()
+      :repatched
+      iex> %DateTime{} = Repatch.real(DateTime, :utc_now, [])
+  """
+  @spec real(module(), atom(), [term()]) :: any()
+  def real(module, function, args) do
+    maybe_raise_repatch_generated(function, :real)
+    :erlang.put(:repatch_bypass_hooks, true)
+    apply(module, function, args)
+  after
+    :erlang.erase(:repatch_bypass_hooks)
   end
 
   @doc """
   Use this on a call which would result only to unpatched versions of functions to be called on the whole stack of calls.
   Works only on calls in `Module.function(arg0, arg1, arg2)` format.
+
+  ## Example
+
+      iex> Repatch.patch(DateTime, :utc_now, fn _calendar -> :repatched end)
+      iex> DateTime.utc_now()
+      :repatched
+      iex> %DateTime{} = Repatch.real(DateTime.utc_now())
   """
   defmacro real({{:., _dotmeta, [_module, function]}, _meta, _args} = call) do
     maybe_raise_repatch_generated(function, __CALLER__, :real)
@@ -339,8 +440,45 @@ defmodule Repatch do
   end
 
   @doc """
+  Function version of the `Repatch.super/1` macro. Please try to use the macro version,
+  since it is slightly more efficient.
+
+  ## Example
+
+      iex> Repatch.patch(DateTime, :utc_now, fn _calendar -> :repatched end)
+      iex> DateTime.utc_now()
+      :repatched
+      iex> Repatch.super(DateTime, :utc_now, [])
+      :repatched
+      iex> %DateTime{} = Repatch.super(DateTime, :utc_now, [Calendar.ISO])
+  """
+  @spec super(module(), atom(), [term()]) :: any()
+  def super(module, function, args) do
+    maybe_raise_repatch_generated(function, :super)
+
+    maybe_raise_non_existing(
+      module,
+      function,
+      Recompiler.super_name_string(function),
+      length(args)
+    )
+
+    super_function = Recompiler.super_name(function)
+    apply(module, super_function, args)
+  end
+
+  @doc """
   Use this on a call which would result only on one unpatched version of the function to be called.
   Works only on calls in `Module.function(arg0, arg1, arg2)` format.
+
+  ## Example
+
+      iex> Repatch.patch(DateTime, :utc_now, fn _calendar -> :repatched end)
+      iex> DateTime.utc_now()
+      :repatched
+      iex> Repatch.super(DateTime.utc_now())
+      :repatched
+      iex> %DateTime{} = Repatch.super(DateTime.utc_now(Calendar.ISO))
   """
   defmacro super({{:., _, [module, function]}, meta, args}) when is_atom(function) do
     super_function = Recompiler.super_name(function)
@@ -352,6 +490,25 @@ defmodule Repatch do
 
   defmacro super(other) do
     raise_wrong_dotcall(other)
+  end
+
+  @doc """
+  Function version of the `private/1` macro. Please try to use the macro version
+  when possible, because macro has slightly better performance
+  """
+  @spec private(module(), atom(), [term()]) :: any()
+  def private(module, function, args) do
+    maybe_raise_repatch_generated(function, :private)
+
+    maybe_raise_non_existing(
+      module,
+      function,
+      Recompiler.private_name_string(function),
+      length(args)
+    )
+
+    private_function = Recompiler.private_name(function)
+    apply(module, private_function, args)
   end
 
   @doc """
@@ -388,6 +545,14 @@ defmodule Repatch do
   See `t:patch_option/0` for available options.
 
   Be aware that it recompiles the module if it was not patched or spied on before, which may take some time.
+
+  ## Example
+
+      iex> ~U[2024-10-20 13:31:59.342240Z] != DateTime.utc_now()
+      true
+      iex> Repatch.patch(DateTime, :utc_now, fn -> ~U[2024-10-20 13:31:59.342240Z] end)
+      iex> DateTime.utc_now()
+      ~U[2024-10-20 13:31:59.342240Z]
   """
   @spec patch(module(), atom(), [patch_option()], function()) :: :ok
   def patch(module, function, opts \\ [], func) do
@@ -402,12 +567,10 @@ defmodule Repatch do
       :macro ->
         hook = prepare_hook(module, function, arity, func)
         add_hook(module, :"MACRO-#{function}", arity, hook, opts)
-        debug("Added #{mode} macro hook")
 
       :function ->
         hook = prepare_hook(module, function, arity, func)
         add_hook(module, function, arity, hook, opts)
-        debug("Added #{mode} function hook")
 
       nil ->
         raise ArgumentError, "Function #{inspect(module)}.#{function}/#{arity} does not exist"
@@ -421,7 +584,7 @@ defmodule Repatch do
     super_name = Recompiler.super_name_string(function)
 
     Enum.find_value(module.module_info(:exports), fn {function, function_arity} ->
-      case Atom.to_string(function) do
+      case atom_to_binary(function) do
         ^macro_name when function_arity == arity ->
           :macro
 
@@ -452,6 +615,8 @@ defmodule Repatch do
           :ets.insert(:repatch_state, {{module, function, arity, self()}, tags})
         end
     end
+
+    debug("Added #{mode} function hook")
   end
 
   defp do_add_hook(module, function, arity, hook, mode) do
@@ -477,6 +642,17 @@ defmodule Repatch do
   @doc """
   Removes any patch or fake on the specified function.
   See `t:restore_option/0` for available options.
+
+  ## Example
+
+      iex> URI.encode_query(%{x: 123})
+      "x=123"
+      iex> Repatch.patch(URI, :encode_query, fn query -> inspect(query) end)
+      iex> URI.encode_query(%{x: 123})
+      "%{x: 123}"
+      iex> Repatch.restore(URI, :encode_query, 1)
+      iex> URI.encode_query(%{x: 123})
+      "x=123"
   """
   @spec restore(module(), atom(), arity(), [restore_option()]) :: :ok
   def restore(module, function, arity, opts \\ []) do
@@ -512,6 +688,22 @@ defmodule Repatch do
   Enables the `allowed` process to use the patch from `owner` process.
   Works only for patches in shared mode.
   See `t:allow_option/0` for available options.
+
+  ## Example
+
+      iex> alias Repatch.Looper
+      iex> require Repatch
+      iex> pid = Looper.start_link()
+      iex> Range.new(1, 3)
+      1..3
+      iex> Repatch.patch(Range, :new, [mode: :shared], fn l, r -> Enum.to_list(Repatch.super(Range.new(l, r))) end)
+      iex> Range.new(1, 3)
+      [1, 2, 3]
+      iex> Looper.call(pid, Range, :new, [1, 3])
+      1..3
+      iex> Repatch.allow(self(), pid)
+      iex> Looper.call(pid, Range, :new, [1, 3])
+      [1, 2, 3]
   """
   @spec allow(pid(), pid(), [allow_option()]) :: :ok
   def allow(owner, allowed, opts \\ []) do
@@ -557,6 +749,25 @@ defmodule Repatch do
   Works only when shared mode is enabled.
 
   Please note that deep allowances are returned as the final allowed process.
+
+  ## Example
+
+      iex> alias Repatch.Looper
+      iex> require Repatch
+      iex> pid1 = Looper.start_link()
+      iex> pid2 = Looper.start_link()
+      iex> Repatch.allowances()
+      []
+      iex> Repatch.allow(self(), pid1)
+      iex> Repatch.allowances()
+      [pid1]
+      iex> Repatch.allow(pid1, pid2)
+      iex> pid1 in Repatch.allowances() and pid2 in Repatch.allowances()
+      true
+      iex> Repatch.allowances(pid1)
+      []
+      iex> Repatch.allowances(pid2)
+      []
   """
   @spec allowances(pid()) :: [pid()]
   def allowances(pid \\ self()) do
@@ -570,6 +781,21 @@ defmodule Repatch do
   Works only when shared mode is enabled.
 
   Please note that deep allowances are returned as the final owner of the process.
+
+  ## Example
+
+      iex> alias Repatch.Looper
+      iex> require Repatch
+      iex> pid1 = Looper.start_link()
+      iex> pid2 = Looper.start_link()
+      iex> Repatch.owner(pid1)
+      nil
+      iex> Repatch.allow(self(), pid1)
+      iex> Repatch.owner(pid1)
+      self()
+      iex> Repatch.allow(pid1, pid2)
+      iex> Repatch.owner(pid2)
+      self()
   """
   @spec owner(pid()) :: pid() | nil
   def owner(pid \\ self()) do
@@ -581,6 +807,12 @@ defmodule Repatch do
 
   @doc """
   For debugging purposes only. Returns list of tags which indicates patch state of the specified function.
+
+  ## Example
+
+      iex> Repatch.patch(MapSet, :new, fn -> :not_a_mapset end)
+      iex> Repatch.info(MapSet, :new, 0)
+      [:patched, :local]
   """
   @spec info(module(), atom(), arity(), pid()) :: [tag()]
   @spec info(module(), atom(), arity(), :any) :: %{pid() => [tag()]}
@@ -607,6 +839,14 @@ defmodule Repatch do
 
   @doc """
   Checks if function is patched in any (or some specific) mode.
+
+  ## Example
+
+      iex> Repatch.repatched?(MapSet, :new, 0)
+      false
+      iex> Repatch.patch(MapSet, :new, fn -> :not_a_mapset end)
+      iex> Repatch.repatched?(MapSet, :new, 0)
+      true
   """
   @spec repatched?(module(), atom(), arity(), [repatched_check_option()]) :: boolean()
   def repatched?(module, function, arity, opts \\ []) do
@@ -640,7 +880,26 @@ defmodule Repatch do
   Checks if the function call is present in the history or not.
   Works with exact match on arguments or just an arity.
   Works only when history is enabled in setup.
+  Please make sure that module is spied on or at least patched before querying history on it.
   See `t:called_check_option/0` for available options.
+
+  ## Example
+
+      iex> Path.join("left", "right")
+      "left/right"
+      iex> Repatch.called?(Path, :join, 2)
+      false
+      iex> Repatch.patch(Path, :join, fn left, right -> left <> "|" <> right end)
+      iex> Path.join("left", "right")
+      "left|right"
+      iex> Repatch.called?(Path, :join, 2)
+      true
+      iex> Repatch.called?(Path, :join, 2, exactly: :once)
+      true
+      iex> Path.join("left", "right")
+      "left|right"
+      iex> Repatch.called?(Path, :join, 2, exactly: :once)
+      false
   """
   @spec called?(module(), atom(), arity() | [term()], [called_check_option()]) :: boolean()
   def called?(module, function, arity_or_args, opts \\ []) do
@@ -795,8 +1054,17 @@ defmodule Repatch do
     end
   end
 
-  defp prepare_hook(_module, _function, _arity, hook) do
-    fn args -> {:ok, apply(hook, args)} end
+  if debugging? do
+    defp prepare_hook(module, function, _arity, hook) do
+      fn args ->
+        debug("Calling hook #{inspect(module)}.#{function}#{inspect(args)}")
+        {:ok, apply(hook, args)}
+      end
+    end
+  else
+    defp prepare_hook(_module, _function, _arity, hook) do
+      fn args -> {:ok, apply(hook, args)} end
+    end
   end
 
   @doc false
