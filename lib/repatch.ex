@@ -55,10 +55,21 @@ defmodule Repatch do
           | {:recompile, module() | [module()]}
 
   @typedoc """
-  Mode of the patch or fake
+  Mode of the patch, fake or application env isolation. These modes
+  define the levels of isolation of the patches:
+
+  * `:local` — Patches will work only in the process which set the patches
+  * `:shared` — Patches will work only in the process which set the patches or allowed processes. See `Repatch.allow/2`.
+  * `:global` — Patches will work in all processes.
+
+  Please check out "Isolation modes" doc for more information on details.
   """
   @type mode :: :local | :shared | :global
 
+  @typedoc """
+  Debug metadata tag of the function. Declares if the function is patched
+  and what mode was used for the patch.
+  """
   @type tag :: :patched | mode()
 
   @type recompile_option :: {:ignore_forbidden_module, boolean()}
@@ -129,14 +140,22 @@ defmodule Repatch do
     :ok
   end
 
-  defp setup_table(name, options) do
+  @doc false
+  @spec setup_table(atom(), [any()]) :: :ok
+  def setup_table(name, options) do
     case :ets.whereis(name) do
-      :undefined -> :ets.new(name, options)
-      _ -> :ok
+      :undefined ->
+        :ets.new(name, options)
+        :ok
+
+      _ ->
+        :ok
     end
   end
 
-  defp recompile(module, opts) do
+  @doc false
+  @spec recompile(module(), [recompile_option()]) :: :ok
+  def recompile(module, opts \\ []) do
     if module in @forbidden_modules and not Keyword.get(opts, :ignore_forbidden_module, false) do
       raise ArgumentError,
             "Module #{inspect(module)} is a forbidden to patch module, because it may interfere with the Repatch logic"

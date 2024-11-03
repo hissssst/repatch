@@ -20,6 +20,8 @@ Repatch is a library for efficient, ergonomic and concise mocking/patching in te
 
 7. **Works with other testing frameworks** and even in environments like `iex` or remote shell.
 
+8. Get **async-friendly application env!** with just a single line in test. See `Repatch.Application`.
+
 ## Installation
 
 ```elixir
