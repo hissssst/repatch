@@ -154,7 +154,7 @@ defmodule Repatch do
   end
 
   @doc false
-  @spec recompile(module(), [recompile_option()]) :: :ok
+  @spec recompile(module(), [recompile_option() | any()]) :: :ok
   def recompile(module, opts \\ []) do
     if module in @forbidden_modules and not Keyword.get(opts, :ignore_forbidden_module, false) do
       raise ArgumentError,

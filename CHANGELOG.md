@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1
+
+* Tiny fix for dialyzer
+
+## 1.2.0
+
+* Application env patching introduced
+
 ## 1.1.0
 
 * Fixed a bug with incorrect ordering of arguments in patch functions
