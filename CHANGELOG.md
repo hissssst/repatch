@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.0
+
+* Adds `$callers` integration
+
 ## 1.2.1
 
 * Tiny fix for dialyzer

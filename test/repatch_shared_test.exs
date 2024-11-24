@@ -150,4 +150,37 @@ defmodule RepatchSharedTest do
     assert Looper.call(p) == 103
     assert Looper.call(p2) == 103
   end
+
+  test "$callers works" do
+    assert 4 == Task.await(Task.async(fn -> X.f(3) end))
+
+    Repatch.patch(X, :f, [mode: :shared], fn x -> x * x end)
+    assert 9 == Task.await(Task.async(fn -> X.f(3) end))
+  end
+
+  test "Nested $callers works" do
+    assert 4 ==
+             Task.await(
+               Task.async(fn ->
+                 Task.await(
+                   Task.async(fn ->
+                     X.f(3)
+                   end)
+                 )
+               end)
+             )
+
+    Repatch.patch(X, :f, [mode: :shared], fn x -> x * x * x end)
+
+    assert 27 ==
+             Task.await(
+               Task.async(fn ->
+                 Task.await(
+                   Task.async(fn ->
+                     X.f(3)
+                   end)
+                 )
+               end)
+             )
+  end
 end

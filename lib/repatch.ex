@@ -59,7 +59,7 @@ defmodule Repatch do
   define the levels of isolation of the patches:
 
   * `:local` — Patches will work only in the process which set the patches
-  * `:shared` — Patches will work only in the process which set the patches or allowed processes. See `Repatch.allow/2`.
+  * `:shared` — Patches will work only in the process which set the patches, spawned tasks or allowed processes. See `Repatch.allow/2`.
   * `:global` — Patches will work in all processes.
 
   Please check out "Isolation modes" doc for more information on details.
@@ -1118,7 +1118,13 @@ defmodule Repatch do
         :undefined ->
           case :ets.lookup(:repatch_shared_allowances, self()) do
             [] ->
-              dispatch_global(module, function, arity, args)
+              case :erlang.get(:"$callers") do
+                [_ | _] = callers ->
+                  dispatch_callers(callers, module, function, arity, args)
+
+                _ ->
+                  dispatch_global(module, function, arity, args)
+              end
 
             [{_, pid}] when is_pid(pid) ->
               dispatch_allowance(module, function, arity, args, pid)
@@ -1130,6 +1136,21 @@ defmodule Repatch do
       end
     else
       dispatch_global(module, function, arity, args)
+    end
+  end
+
+  defp dispatch_callers([], module, function, arity, args) do
+    dispatch_global(module, function, arity, args)
+  end
+
+  defp dispatch_callers([caller | tail], module, function, arity, args) do
+    case :ets.lookup(:repatch_shared_hooks, {module, function, arity, caller}) do
+      [] ->
+        dispatch_callers(tail, module, function, arity, args)
+
+      [{_, hook}] when is_function(hook) ->
+        debug("Dispatched allowance with caller owner #{inspect(pid)}")
+        hook.(args)
     end
   end
 

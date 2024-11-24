@@ -13,7 +13,7 @@ However, local patches do not affect other processes and it is __completely safe
 ## Shared mode
 
 This mode is enabled by default but it can be disabled with `enable_shared: false` setting in the `Patch.setup/1` call.
-It works by storing the patch for the **current process and any allowed process**. This mechanic is similar to testing
+It works by storing the patch for the **current process, Task processes it calls and any allowed process**. This mechanic is similar to testing
 with allowances in `Ecto` and `Mox`, though it is slitghtly different. To allow other process to use shared
 patches of the current process or any other process, one should use `Repatch.allow/2`
 
@@ -42,6 +42,9 @@ Due to it's nature, it is also safe to use this mode with `async: true` testing 
 tests running at the same time, will try to allow the same third process to call shared patches,
 one of the `allow` calls will fail, so it's up to developer to make sure that processes are not shared
 between tests.
+
+It also has integration with `Task` module similar to `Mox`'s one, and it allows spawned tasks to
+call the patches of their original caller automatically (without explicit `Repatch.allow/3` call).
 
 ## Global mode
 
