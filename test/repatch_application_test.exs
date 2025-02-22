@@ -77,6 +77,10 @@ defmodule Repatch.ApplicationTest do
     assert_isolation(:some, :thing)
   end
 
+  test ":application.get_env/1" do
+    assert :undefined == :application.get_env(:key)
+  end
+
   test ":application.get_env/2 global" do
     assert {:ok, :thing} == :application.get_env(:ex_unit, :some)
     assert :undefined == :application.get_env(:ex_unit, :key)
@@ -139,6 +143,10 @@ defmodule Repatch.ApplicationTest do
     Application.put_env(:ex_unit, :some, :other_thing)
     assert :other_thing == :application.get_all_env(:ex_unit)[:some]
     assert_isolation(:some, :thing)
+  end
+
+  test ":application.get_all_env/0" do
+    assert [] == :application.get_all_env()
   end
 
   test "Application.get_all_env/1 global" do

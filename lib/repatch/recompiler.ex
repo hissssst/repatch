@@ -5,15 +5,17 @@ defmodule Repatch.Recompiler do
 
   @generated [generated: true]
 
-  @spec recompile(module()) :: {:ok, binary()} | {:error, any()}
-  def recompile(module) do
+  @spec recompile(module(), Keyword.t()) :: {:ok, binary()} | {:error, any()}
+  def recompile(module, opts) do
+    filter = parse_filter_opts(opts)
+
     with(
       {:module, ^module} <- Code.ensure_loaded(module),
       {:ok, bin} <- binary(module),
       {:ok, compiler_options} <- compiler_options(bin),
       {:ok, forms} <- abstract_forms(bin)
     ) do
-      forms = reload(forms, module)
+      forms = reload(forms, module, filter)
 
       :code.purge(module)
       :code.delete(module)
@@ -21,6 +23,49 @@ defmodule Repatch.Recompiler do
       with :ok <- compile(forms, compiler_options) do
         {:ok, bin}
       end
+    end
+  end
+
+  # Checks if tuple is an {atom, atom, positive_integer} form
+  defguardp is_mfarity(mfarity)
+            when tuple_size(mfarity) == 3 and
+                   is_atom(:erlang.element(1, mfarity)) and is_atom(:erlang.element(2, mfarity)) and
+                   is_integer(:erlang.element(3, mfarity)) and :erlang.element(3, mfarity) >= 0
+
+  defp parse_filter_opts(opts) do
+    only = Keyword.get(opts, :recompile_only, [])
+    except = Keyword.get(opts, :recompile_except, [])
+
+    Enum.each(except, fn
+      mfarity when is_mfarity(mfarity) ->
+        :ok
+
+      other ->
+        raise ArgumentError,
+              "Expected {module, function, arity} for recompile_except. Got #{inspect(other)}."
+    end)
+
+    Enum.each(only, fn
+      mfarity when is_mfarity(mfarity) ->
+        if mfarity in except do
+          raise ArgumentError,
+                "#{inspect(mfarity)} is present in both recompile_except and recompile_only."
+        end
+
+      other ->
+        raise ArgumentError,
+              "Expected {module, function, arity} for recompile_only. Got #{inspect(other)}."
+    end)
+
+    case only do
+      [] ->
+        case except do
+          [] -> fn _ -> true end
+          _ -> fn x -> x not in except end
+        end
+
+      _ ->
+        fn x -> x in only end
     end
   end
 
@@ -157,11 +202,11 @@ defmodule Repatch.Recompiler do
     end
   end
 
-  defp reload(abstract_forms, module) do
-    traverse(abstract_forms, [], module, [])
+  defp reload(abstract_forms, module, filter) do
+    traverse(abstract_forms, [], module, [], filter)
   end
 
-  defp traverse([head | tail], exports, module, acc) do
+  defp traverse([head | tail], exports, module, acc, filter) do
     case head do
       {:attribute, _, :export, old_exports} ->
         exports_and_supers =
@@ -170,53 +215,62 @@ defmodule Repatch.Recompiler do
               [x]
 
             {name, arity} ->
-              [
-                {name, arity},
-                {super_name(name), arity}
-              ]
+              if filter.({module, name, arity}) do
+                [
+                  {name, arity},
+                  {super_name(name), arity}
+                ]
+              else
+                [{name, arity}]
+              end
           end)
 
-        traverse(tail, exports ++ exports_and_supers, module, acc)
+        traverse(tail, exports ++ exports_and_supers, module, acc, filter)
 
       {:attribute, anno, :compile, options} ->
         case filter_compile_options(options) do
           [] ->
-            traverse(tail, exports, module, acc)
+            traverse(tail, exports, module, acc, filter)
 
           options ->
             form = {:attribute, anno, :compile, options}
-            traverse(tail, exports, module, [form | acc])
+            traverse(tail, exports, module, [form | acc], filter)
         end
 
       {:attribute, _anno, :import, _} = keep ->
-        traverse(tail, exports, module, [keep | acc])
+        traverse(tail, exports, module, [keep | acc], filter)
 
       {:function, _, name, _, _} = function when name in ~w[__info__ module_info]a ->
-        traverse(tail, exports, module, [function | acc])
+        traverse(tail, exports, module, [function | acc], filter)
 
-      {:function, anno, name, arity, clauses} ->
-        if {name, arity} in exports do
-          old_name = super_name(name)
-          exports = [{old_name, arity} | exports]
-          acc = function(module, anno, name, old_name, arity, clauses) ++ acc
-          traverse(tail, exports, module, acc)
+      {:function, anno, name, arity, clauses} = function ->
+        if filter.({module, name, arity}) do
+          if {name, arity} in exports do
+            old_name = super_name(name)
+            exports = [{old_name, arity} | exports]
+            acc = function(module, anno, name, old_name, arity, clauses) ++ acc
+            traverse(tail, exports, module, acc, filter)
+          else
+            old_name = super_name(name)
+            private_name = private_name(name)
+            exports = [{old_name, arity}, {private_name, arity} | exports]
+
+            acc =
+              private_function(module, anno, name, old_name, private_name, arity, clauses) ++ acc
+
+            traverse(tail, exports, module, acc, filter)
+          end
         else
-          old_name = super_name(name)
-          private_name = private_name(name)
-          exports = [{old_name, arity}, {private_name, arity} | exports]
-
-          acc =
-            private_function(module, anno, name, old_name, private_name, arity, clauses) ++ acc
-
-          traverse(tail, exports, module, acc)
+          acc = [function | acc]
+          traverse(tail, exports, module, acc, filter)
         end
 
       _ ->
-        traverse(tail, exports, module, acc)
+        traverse(tail, exports, module, acc, filter)
     end
   end
 
-  defp traverse([], exports, module, acc) do
+  defp traverse([], exports, module, acc, _filter) do
     exports = Enum.uniq(exports)
 
     [

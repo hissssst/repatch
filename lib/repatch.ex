@@ -72,7 +72,17 @@ defmodule Repatch do
   """
   @type tag :: :patched | mode()
 
-  @type recompile_option :: {:ignore_forbidden_module, boolean()}
+  @typedoc """
+  Options passed in all functions which trigger module recompilation
+
+  * `ignore_forbidden_module` (boolean) — Whether to ignore the warning about forbidden module being recompiled.
+  * `recompile_only` (list of {module, function, arity} tuples) — Only these functions will be recompiled in this module or modules.
+  * `recompile_except` (list of {module, function, arity} tuples) — All functions except specified will be recompiled in this module or modules.
+  """
+  @type recompile_option ::
+          {:ignore_forbidden_module, boolean()}
+          | {:recompile_only, [{module(), atom(), arity()}]}
+          | {:recompile_except, [{module(), atom(), arity()}]}
 
   @doc """
   Setup function. Use it only once per test suite.
@@ -131,8 +141,29 @@ defmodule Repatch do
         :persistent_term.put(:repatch_history_enabled, false)
     end
 
-    for module <- List.wrap(Keyword.get(opts, :recompile, [])) do
-      spawn_link(fn -> recompile(module, opts) end)
+    # Doing this without Task, because we want to let users patch Task
+
+    caller = self()
+
+    to_await =
+      for module <- List.wrap(Keyword.get(opts, :recompile, [])) do
+        ref = make_ref()
+
+        spawn_link(fn ->
+          recompile(module, opts)
+          send(caller, {module, ref})
+        end)
+
+        {module, ref}
+      end
+
+    for {module, ref} <- to_await do
+      receive do
+        {^module, ^ref} -> :ok
+      after
+        30_000 ->
+          raise "Recompilation is taking more than 30 seconds"
+      end
     end
 
     debug("setup successful")
@@ -174,21 +205,27 @@ defmodule Repatch do
 
       [] ->
         if :ets.insert_new(:repatch_module_states, {module, :recompiling}) do
-          case Recompiler.recompile(module) do
-            {:ok, bin} ->
-              :ets.insert(:repatch_module_states, {module, {:recompiled, bin}})
-              debug("Recompiled #{inspect(module)}")
+          try do
+            case Recompiler.recompile(module, opts) do
+              {:ok, bin} ->
+                :ets.insert(:repatch_module_states, {module, {:recompiled, bin}})
+                debug("Recompiled #{inspect(module)}")
 
-            {:error, :nofile} ->
-              raise ArgumentError, "Module #{inspect(module)} does not exist"
+              {:error, :nofile} ->
+                raise ArgumentError, "Module #{inspect(module)} does not exist"
 
-            {:error, :binary_unavailable} ->
-              raise ArgumentError, "Binary for module #{inspect(module)} is unavailable"
+              {:error, :binary_unavailable} ->
+                raise ArgumentError, "Binary for module #{inspect(module)} is unavailable"
 
-            {:error, {:abstract_forms_unavailable, _}} ->
-              raise ArgumentError,
-                    "Abstract forms for module #{inspect(module)} are unavailable. " <>
-                      "Please make sure that your modules are compiled with debug info"
+              {:error, {:abstract_forms_unavailable, _}} ->
+                raise ArgumentError,
+                      "Abstract forms for module #{inspect(module)} are unavailable. " <>
+                        "Please make sure that your modules are compiled with debug info"
+            end
+          rescue
+            error ->
+              :ets.delete(:repatch_module_states, module)
+              reraise error, __STACKTRACE__
           end
         else
           await_recompilation(module)

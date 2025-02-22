@@ -2,7 +2,7 @@ defmodule Repatch.MixProject do
   use Mix.Project
 
   def version do
-    "1.3.0"
+    "1.4.0"
   end
 
   def description do

@@ -60,3 +60,9 @@ patch the private/public function which calls it. Otherwise, every call to this 
 and will be slowed down. **This tip is especially useful for recursive functions**.
 
 It also applies to Erlang stdlib functions and modules and frequently called libraries like `:telemetry`
+
+## Use `recompile_only` and `recompile_except` options
+
+These options control the functions which are recompiled in the module. Functions, which are not
+recompiled are not affected by patches and their history is no tracked, but on the other hand
+they are not affected by additional runtime overhead like recompiled functions do.

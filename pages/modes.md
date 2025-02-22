@@ -5,17 +5,16 @@ when testing with `async: true`, and it is important to know when and how to use
 
 ## Local mode
 
-This mode is always enabled and work by applying patches only to the **current process**.
-That means that any other process will be unable to execute the patch that the other process set.
+This mode is always enabled and isolates applied patches only to the **current process**.
+Any other process will be unable to execute the patch that this process set.
 However, local patches do not affect other processes and it is __completely safe__ to use this mode with
 `async: true` testing option. This mode is also the fastest one in terms of runtime overhead.
 
 ## Shared mode
 
-This mode is enabled by default but it can be disabled with `enable_shared: false` setting in the `Patch.setup/1` call.
-It works by storing the patch for the **current process, Task processes it calls and any allowed process**. This mechanic is similar to testing
-with allowances in `Ecto` and `Mox`, though it is slitghtly different. To allow other process to use shared
-patches of the current process or any other process, one should use `Repatch.allow/2`
+This mode is enabled by default but it can be disabled with `enable_shared: false` option in the `Patch.setup/1` call.
+It isolates the patch for the **current process, Task processes it creates and any allowed process**. This mechanic is similar to testing
+with allowances in `Ecto` and `Mox`, though it is slightly different. Use `Repatch.allow/2` to share the patch with other processes.
 
 Consider this example
 
@@ -48,9 +47,6 @@ call the patches of their original caller automatically (without explicit `Repat
 
 ## Global mode
 
-This mode is disabled by default and must be enabled with `enable_global: true` setting in `Patch.setup` call.
-It works by storing the patch for the **current process and any other process**. This mechanic is similar to testing
-with `Patch` library or global mode in `Mox`. Other processes will be able to call the patch without any explicit
-allowance or anything. Therefore, this mode can be used with `async: true` only when it is guaranteed that
-it is okay if other processes may call the patched function or it is guaranteed that other processes
-will never call the patched function.
+This mode is disabled by default and must be enabled with `enable_global: true` option in `Patch.setup` call.
+It doesn't isolate the patch in any way, what means that the patch will be accessible by the **current process and any other process**.
+This mechanic is similar to testing with `Patch` library or global mode in `Mox`.

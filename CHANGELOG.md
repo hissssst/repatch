@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0
+
+* Adds `recompile_only` option
+* Adds `recompile_except` option
+* Increased coverage
+* Fixes a bug with `setup(recompile: _)` not awaiting for recompilation to complete
+* Fixes typos and improves documentation
+
 ## 1.3.0
 
 * Adds `$callers` integration

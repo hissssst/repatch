@@ -282,4 +282,12 @@ defmodule RepatchTest do
     assert :code.is_sticky(:string)
     assert :string.is_empty("") == "Not even boolean"
   end
+
+  test "info test" do
+    Repatch.patch(X, :f, fn x -> x - 1 end)
+
+    assert [:patched, :local] == Repatch.info(X, :f, 1, self())
+    caller = self()
+    assert %{^caller => [:patched, :local]} = Repatch.info(X, :f, 1, :any)
+  end
 end
