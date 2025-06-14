@@ -13,6 +13,7 @@ defmodule Repatch do
     :erlang,
     :ets,
     :persistent_term,
+    Agent,
     Enum,
     Keyword,
     Map,
@@ -78,9 +79,11 @@ defmodule Repatch do
   * `ignore_forbidden_module` (boolean) — Whether to ignore the warning about forbidden module being recompiled.
   * `recompile_only` (list of {module, function, arity} tuples) — Only these functions will be recompiled in this module or modules.
   * `recompile_except` (list of {module, function, arity} tuples) — All functions except specified will be recompiled in this module or modules.
+  * `module_binary` (binary) — The BEAM binary of the module to recompile
   """
   @type recompile_option ::
           {:ignore_forbidden_module, boolean()}
+          | {:module_binary, binary()}
           | {:recompile_only, [{module(), atom(), arity()}]}
           | {:recompile_except, [{module(), atom(), arity()}]}
 
@@ -88,11 +91,11 @@ defmodule Repatch do
   Setup function. Use it only once per test suite.
   See `t:setup_option/0` for available options.
 
-  It is suggested to be put in the `test_helper.exs` after the `ExUnit.start()` line
-
   ## Example
 
       iex> Repatch.setup(enable_shared: false)
+
+  It is suggested to be put in the `test_helper.exs` after the `ExUnit.start()` line
   """
   @spec setup([setup_option()]) :: :ok
   def setup(opts \\ []) do
@@ -235,8 +238,6 @@ defmodule Repatch do
 
   @doc """
   Cleans up current test process (or any other process) Repatch-state.
-  It is recommended to be called during the test exit.
-  Check out `Repatch.ExUnit` module which set up this callback up.
 
   ## Example
 
@@ -249,6 +250,9 @@ defmodule Repatch do
       iex> Repatch.called?(DateTime, :utc_now, 0)
       false
       iex> %DateTime{} = DateTime.utc_now()
+
+  It is recommended to be called during the test exit.
+  Check out `Repatch.ExUnit` module which set up this callback up.
   """
   @spec cleanup(pid()) :: :ok
   def cleanup(pid \\ self()) do
@@ -286,8 +290,7 @@ defmodule Repatch do
 
   @doc """
   Clears all state of the `Repatch` including all patches, fakes and history, and reloads all
-  old modules back, disabling history collection on them. It is not recommended to be called
-  during testing and it is suggested to be used only when Repatch is used in iex session.
+  modules back to their original bytecode, disabling history collection on them.
 
   ## Example
 
@@ -296,6 +299,9 @@ defmodule Repatch do
       :ok
       iex> Repatch.restore_all()
       iex> %DateTime{} = DateTime.utc_now()
+
+  It is not recommended to be called during testing and it is suggested to be used only
+  when Repatch is used in iex session.
   """
   @spec restore_all() :: :ok
   def restore_all do
@@ -333,8 +339,7 @@ defmodule Repatch do
   @type spy_option :: recompile_option() | {:by, pid()}
 
   @doc """
-  Cleans the existing history of current process calls to this module
-  and starts tracking new history of all calls to the specified module.
+  Tracks calls to the specified module.
 
   Be aware that it recompiles the module if it was not patched or spied on before, which may take some time.
 
@@ -347,6 +352,8 @@ defmodule Repatch do
       iex> Repatch.spy(DateTime)
       iex> Repatch.called?(DateTime, :utc_now, 0)
       false
+
+  If spy is called on the same module for more than one time, it will clear the history of calls.
   """
   @spec spy(module(), [spy_option()]) :: :ok
   def spy(module, opts \\ []) do
@@ -361,7 +368,7 @@ defmodule Repatch do
 
   * `ignore_forbidden_module` (boolean) — Whether to ignore the warning about forbidden module is being spied. Defaults to `false`.
   * `force` (boolean) — Whether to override existing patches and fakes. Defaults to `false`.
-  * `mode` (`:local` | `:shared` | `:global`) — What mode to use for the fake. See `t:mode/0` for more info. Defaults to `:local`.
+  * `mode` (`:local` | `:shared` | `:global`) — What mode to use for the patch. See `t:mode/0` for more info. Defaults to `:local`.
   """
   @type fake_option :: patch_option()
 
@@ -587,7 +594,7 @@ defmodule Repatch do
   Options passed in the `patch/4` function.
 
   * `ignore_forbidden_module` (boolean) — Whether to ignore the warning about forbidden module is being spied. Defaults to `false`.
-  * `force` (boolean) — Whether to override existing patches and fakes. Defaults to `false`.
+  * `force` (boolean) — Whether to override existing patches. Defaults to `false`.
   * `mode` (`:local` | `:shared` | `:global`) — What mode to use for the patch. See `t:mode/0` for more info. Defaults to `:local`.
   """
   @type patch_option ::
@@ -600,8 +607,6 @@ defmodule Repatch do
   Starts tracking history on all calls in the module too.
   See `t:patch_option/0` for available options.
 
-  Be aware that it recompiles the module if it was not patched or spied on before, which may take some time.
-
   ## Example
 
       iex> ~U[2024-10-20 13:31:59.342240Z] != DateTime.utc_now()
@@ -609,6 +614,11 @@ defmodule Repatch do
       iex> Repatch.patch(DateTime, :utc_now, fn -> ~U[2024-10-20 13:31:59.342240Z] end)
       iex> DateTime.utc_now()
       ~U[2024-10-20 13:31:59.342240Z]
+
+  Be aware that it recompiles the module if it was not patched before, which may take some time.
+
+  And it is also recommended to not patch functions which can be changed in the future, since
+  every patch is an implicit dependency on the internals of implementation.
   """
   @spec patch(module(), atom(), [patch_option()], function()) :: :ok
   def patch(module, function, opts \\ [], func) do
@@ -653,7 +663,8 @@ defmodule Repatch do
     end)
   end
 
-  defp add_hook(module, function, arity, hook, opts) do
+  @doc false
+  def add_hook(module, function, arity, hook, opts) do
     mode = Keyword.get(opts, :mode, :local)
 
     case :ets.lookup(:repatch_state, {module, function, arity, self()}) do
@@ -696,7 +707,7 @@ defmodule Repatch do
   @type restore_option() :: {:mode, mode()}
 
   @doc """
-  Removes any patch or fake on the specified function.
+  Removes any patch on the specified function.
   See `t:restore_option/0` for available options.
 
   ## Example
@@ -934,9 +945,6 @@ defmodule Repatch do
 
   @doc """
   Checks if the function call is present in the history or not.
-  Works with exact match on arguments or just an arity.
-  Works only when history is enabled in setup.
-  Please make sure that module is spied on or at least patched before querying history on it.
   See `t:called_check_option/0` for available options.
 
   ## Example
@@ -956,6 +964,9 @@ defmodule Repatch do
       "left|right"
       iex> Repatch.called?(Path, :join, 2, exactly: :once)
       false
+
+  Works only when history is enabled in setup.
+  Please make sure that module is spied on or at least patched before querying history on it.
   """
   @spec called?(module(), atom(), arity() | [term()], [called_check_option()]) :: boolean()
   def called?(module, function, arity_or_args, opts \\ []) do

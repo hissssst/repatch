@@ -28,4 +28,16 @@ defmodule X do
   defmacro macro(x) do
     quote do: unquote(x) * 10
   end
+
+  def claused(1) do
+    2
+  end
+
+  def claused(2) do
+    4
+  end
+
+  def claused(_other) do
+    1024
+  end
 end

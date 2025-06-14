@@ -2,32 +2,34 @@
 
 <!-- MDOC -->
 
-Repatch is a library for efficient, ergonomic and concise mocking/patching in tests (or not tests)
+Repatch is a library for efficient, ergonomic and concise mocking/patching in tests (or not tests). It
+provides an efficient and async-friendly replacement for Mox, ProtoMock, Patch, Mock and all other
+similar libraries.
 
 ## Features
 
-1. Patch **any** function or macro (except NIF and BIF). Elixir or Erlang, private or public, it can be patched!
+* **Patches any function or macro**. Elixir or Erlang, private or public (except BIF/NIF).
 
-2. Designed to work with `async: true`. Has 3 isolation levels for testing multi-processes scenarios.
+* **Async friendly**. With local, global, and allowances modes.
 
-3. Requires **no boilerplate or explicit DI**. Though, you are completely free to write in this style with Repatch!
+* **Boilerplate-free**. But you still can leverage classic explicit DI with Repatch.
 
-4. Every patch is consistent and **applies to direct or indirect calls** and **any process** you choose.
+* **Call history**.
 
-5. Powerful **call history** tracking.
+* **Built-in async-friendly application env**. See `Repatch.Application`.
 
-6. `super` and `real` helpers for calling original functions.
+* **Mock behaviour and protocol implementation generation**. See `Repatch.Mock`
 
-7. **Works with other testing frameworks** and even in environments like `iex` or remote shell.
+* **Supports expect-style mocking**. See `Repatch.Expectations`
 
-8. Get **async-friendly application env!** with just a single line in test. See `Repatch.Application`.
+* **Testing framework agnostic**. It even works in `iex` and remote shells.
 
 ## Installation
 
 ```elixir
 def deps do
   [
-    {:repatch, "~> 1.0"}
+    {:repatch, "~> 1.5"}
   ]
 end
 ```
@@ -40,7 +42,7 @@ end
 
 2. `use Repatch.ExUnit` in your test module
 
-3. Call `Repatch.patch` or `Repatch.fake` to change implementation of any function and any module.
+3. Call `Repatch.patch/3` to change implementation of any function in any module.
 
 ### For example
 
@@ -50,11 +52,11 @@ defmodule ThatsATest do
   use Repatch.ExUnit
 
   test "that's not a MapSet.new" do
-    Repatch.patch(MapSet, :new, fn ->
+    Repatch.patch(MapSet, :new, fn _list ->
       %{thats_not: :a_map_set}
     end)
 
-    assert MapSet.new() == %{thats_not: :a_map_set}
+    assert MapSet.new([1, 2, 3]) == %{thats_not: :a_map_set}
 
     assert Repatch.called?(MapSet, :new, 1)
   end

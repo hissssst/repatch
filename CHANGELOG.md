@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.0
+
+* Adds mock module generation
+* Adds expect and stuff for Mox-alike expectations
+* Improves documentation
+
 ## 1.4.0
 
 * Adds `recompile_only` option

@@ -11,7 +11,7 @@ defmodule Repatch.Recompiler do
 
     with(
       {:module, ^module} <- Code.ensure_loaded(module),
-      {:ok, bin} <- binary(module),
+      {:ok, bin} <- binary(module, opts),
       {:ok, compiler_options} <- compiler_options(bin),
       {:ok, forms} <- abstract_forms(bin)
     ) do
@@ -177,13 +177,15 @@ defmodule Repatch.Recompiler do
     end
   end
 
-  defp binary(module) do
-    case :code.get_object_code(module) do
-      {^module, binary, _} ->
-        {:ok, binary}
+  defp binary(module, opts) do
+    with :error <- Keyword.fetch(opts, :module_binary) do
+      case :code.get_object_code(module) do
+        {^module, binary, _} ->
+          {:ok, binary}
 
-      :error ->
-        {:error, :binary_unavailable}
+        :error ->
+          {:error, :binary_unavailable}
+      end
     end
   end
 

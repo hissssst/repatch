@@ -53,7 +53,7 @@ assert Enum.any?(history, &match?({MapSet, :new, [1 | _], %MapSet{}}, &1))
 
 If you're using processes which will outlive the test suite, and these processes call the patched modules, you should call `Repatch.cleanup/1` on them from time to time to clean history.
 
-## Try not to patch kernel functions
+## Don't to patch kernel or recursive functions
 
 That means if you have a function which returns result of `Enum.reduce` call, try not to patch it and
 patch the private/public function which calls it. Otherwise, every call to this function will hit disptacher

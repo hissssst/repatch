@@ -2,7 +2,7 @@ defmodule Repatch.MixProject do
   use Mix.Project
 
   def version do
-    "1.4.0"
+    "1.5.0"
   end
 
   def description do
@@ -40,7 +40,7 @@ defmodule Repatch.MixProject do
         ".formatter.exs"
       ],
       maintainers: [
-        "Georgy Sychev"
+        "hissssst"
       ],
       links: %{
         GitHub: "https://github.com/hissssst/repatch",

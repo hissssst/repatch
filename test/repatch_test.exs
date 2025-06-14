@@ -8,6 +8,8 @@ defmodule RepatchTest do
 
   alias Repatch.Looper
 
+  Code.put_compiler_option(:no_warn_undefined, [{X, :private, 1}])
+
   defmacrop assert_all(results \\ [2, 2, 3, 10]) do
     [a, b, c, d] = results
 
@@ -289,5 +291,30 @@ defmodule RepatchTest do
     assert [:patched, :local] == Repatch.info(X, :f, 1, self())
     caller = self()
     assert %{^caller => [:patched, :local]} = Repatch.info(X, :f, 1, :any)
+  end
+
+  test "multi-clause function test" do
+    Repatch.patch(X, :claused, fn x -> x + 100 end)
+
+    assert X.claused(100) == 200
+    assert X.claused(1000) == 1100
+    assert X.claused(1) == 101
+    assert X.claused(2) == 102
+  end
+
+  test "private test" do
+    assert_raise UndefinedFunctionError, fn ->
+      X.private(1)
+    end
+
+    Repatch.patch(X, :private, fn x ->
+      x + 1234
+    end)
+
+    assert Repatch.private(X.private(4321)) == 5555
+
+    assert_raise UndefinedFunctionError, fn ->
+      Repatch.private(X.public(4321))
+    end
   end
 end

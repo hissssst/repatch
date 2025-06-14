@@ -29,7 +29,7 @@ which would indicate that original implementation must be called.
 
 ## Comments
 
-This page describes that in worst case, dispatcher will call process dictionary and lookup into 3 ets tables.
-It is okay for function which are called not very frequently during a test suite, but it is not good when function is
-called a lot of times during the test case (like recursive list traversal functions), it will introduce
-visible overhead. To reduce it, one should disable unused modes and history or take other actions from "Performance tips" guide
+In the worst case, dispatcher will call process dictionary and lookup into 3 ets tables.
+It is tolerable for a function which is called not very frequently during a test suite, but it is not good when function is
+called a lot of times during the suite (like recursive list traversal functions). To reduce this overhead,
+one should disable unused modes and history or take other actions from "Performance tips" guide
