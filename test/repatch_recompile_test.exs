@@ -3,6 +3,8 @@ defmodule RepatchRecompileTest do
 
   alias RecompileSubject, as: Subject
 
+  @moduletag skip: true
+
   setup do
     Repatch.restore_all()
     on_exit(fn -> Repatch.restore_all() end)

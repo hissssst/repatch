@@ -2,6 +2,7 @@ defmodule RepatchHistoryTest do
   use ExUnit.Case, async: true
 
   alias Repatch.Looper
+  require Repatch
 
   test "called with arity" do
     Repatch.spy(X)
@@ -122,5 +123,102 @@ defmodule RepatchHistoryTest do
     Repatch.spy(X)
 
     assert_raise ArgumentError, fn -> Repatch.called?(X, :f, 1, by: :definitely_not_supported) end
+  end
+
+  test "called macro" do
+    require Repatch
+
+    Repatch.spy(X)
+    onetwothree = 123
+
+    assert X.f(123) == 124
+    assert Repatch.called?(X.f(123))
+    assert Repatch.called?(X.f(^onetwothree))
+    assert Repatch.called?(X.f(_))
+    assert Repatch.called?(X.f(x) when x == 123)
+    assert Repatch.called?(X.f(x) when x >= 0)
+
+    refute Repatch.called?(X.f(x) when x < 123)
+    refute Repatch.called?(X.f(124))
+  end
+
+  test "history" do
+    Repatch.spy(X)
+
+    assert X.f(123) == 124
+    assert X.f(123) == 124
+    assert X.f(123) == 124
+
+    assert [
+             {X, :f, [123], _},
+             {X, :f, [123], _},
+             {X, :f, [123], _}
+           ] = Repatch.history()
+
+    assert [
+             {X, :f, [123], _},
+             {X, :f, [123], _},
+             {X, :f, [123], _}
+           ] = Repatch.history(module: X)
+
+    assert [
+             {X, :f, [123], _},
+             {X, :f, [123], _},
+             {X, :f, [123], _}
+           ] = Repatch.history(function: :f)
+
+    assert X.f(1) == 2
+
+    assert [{X, :f, [1], _}] = Repatch.history(args: [1])
+  end
+
+  test "notify/4 shared just works" do
+    executor =
+      spawn_link(fn ->
+        receive do
+          :go -> DateTime.utc_now()
+        end
+      end)
+
+    Repatch.allow(self(), executor)
+
+    notification = Repatch.notify(DateTime, :utc_now, 0, mode: :shared)
+
+    send(executor, :go)
+
+    assert_receive ^notification
+  end
+
+  test "notify/2 shared just works" do
+    executor =
+      spawn_link(fn ->
+        receive do
+          :go -> DateTime.utc_now()
+        end
+      end)
+
+    Repatch.allow(self(), executor)
+
+    notification = Repatch.notify(DateTime.utc_now(), mode: :shared)
+
+    send(executor, :go)
+
+    assert_receive ^notification
+  end
+
+  test "notify/4 local just works" do
+    notification = Repatch.notify(DateTime, :utc_now, 0)
+    refute_receive ^notification
+
+    assert %DateTime{} = DateTime.utc_now()
+    assert_receive ^notification
+  end
+
+  test "notify/2 local just works" do
+    notification = Repatch.notify(DateTime.utc_now())
+    refute_receive ^notification
+
+    assert %DateTime{} = DateTime.utc_now()
+    assert_receive ^notification
   end
 end

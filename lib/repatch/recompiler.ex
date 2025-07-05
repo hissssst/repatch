@@ -3,25 +3,33 @@ defmodule Repatch.Recompiler do
   # Contains all logic related to recompiling the module with
   # implementation which dispatches to hooks
 
-  @generated [generated: true]
-
-  @spec recompile(module(), Keyword.t()) :: {:ok, binary()} | {:error, any()}
+  @spec recompile(module(), Keyword.t()) ::
+          {:ok, old_beam :: binary(), old_filename :: binary()} | {:error, any()}
   def recompile(module, opts) do
     filter = parse_filter_opts(opts)
 
     with(
       {:module, ^module} <- Code.ensure_loaded(module),
       {:ok, bin} <- binary(module, opts),
-      {:ok, compiler_options} <- compiler_options(bin),
-      {:ok, forms} <- abstract_forms(bin)
+      {:ok, forms, compiler_options, source} <- get_chunks(bin)
     ) do
       forms = reload(forms, module, filter)
+
+      filename =
+        Keyword.get_lazy(opts, :loaded_filename, fn ->
+          :code.which(module)
+        end)
+
+      source_filename =
+        Keyword.get_lazy(opts, :source_filename, fn ->
+          source || filename
+        end)
 
       :code.purge(module)
       :code.delete(module)
 
-      with :ok <- compile(forms, compiler_options) do
-        {:ok, bin}
+      with :ok <- compile(forms, compiler_options, filename, source_filename) do
+        {:ok, bin, filename}
       end
     end
   end
@@ -97,43 +105,38 @@ defmodule Repatch.Recompiler do
     end
   end
 
-  @spec load_binary(module(), binary()) :: :ok | {:error, any()}
-  def load_binary(module, binary) do
+  @spec load_binary(module(), charlist(), binary()) :: :ok | {:error, any()}
+  def load_binary(module, filename, binary) do
     sticky = unstick_module(module)
 
-    try do
-      with {:module, ^module} <- :code.load_binary(module, ~c"", binary) do
-        :ok
-      end
-    after
+    with {:module, ^module} <- :code.load_binary(module, filename, binary) do
       if sticky do
         :code.stick_mod(module)
       end
+
+      :ok
     end
   end
 
   ## Privates
 
-  defp compiler_options(binary) do
-    case :beam_lib.chunks(binary, [:compile_info]) do
-      {:ok, {_, [compile_info: info]}} ->
-        filtered_options =
-          case Keyword.fetch(info, :options) do
-            {:ok, options} ->
-              filter_compiler_options(options)
+  defp get_chunks(binary) do
+    case :beam_lib.chunks(binary, [:abstract_code, :compile_info]) do
+      {:ok, {_, chunks}} ->
+        {:raw_abstract_v1, abstract_forms} = Keyword.fetch!(chunks, :abstract_code)
+        compile_info = Keyword.fetch!(chunks, :compile_info)
 
-            :error ->
-              []
-          end
+        options =
+          compile_info
+          |> Keyword.get(:options, [])
+          |> filter_compiler_options()
 
-        {:ok, filtered_options}
+        source = Keyword.get(compile_info, :source)
+
+        {:ok, abstract_forms, options, source}
 
       {:error, :beam_lib, details} ->
-        reason = elem(details, 0)
-        {:error, reason}
-
-      _ ->
-        {:error, :compiler_options_unavailable}
+        {:error, details}
     end
   end
 
@@ -164,19 +167,6 @@ defmodule Repatch.Recompiler do
     end
   end
 
-  defp abstract_forms(binary) do
-    case :beam_lib.chunks(binary, [:abstract_code]) do
-      {:ok, {_, [abstract_code: {:raw_abstract_v1, abstract_forms}]}} ->
-        {:ok, abstract_forms}
-
-      {:error, :beam_lib, details} ->
-        {:error, {:abstract_forms_unavailable, details}}
-
-      _ ->
-        {:error, {:abstract_forms_unavailable, []}}
-    end
-  end
-
   defp binary(module, opts) do
     with :error <- Keyword.fetch(opts, :module_binary) do
       case :code.get_object_code(module) do
@@ -189,15 +179,21 @@ defmodule Repatch.Recompiler do
     end
   end
 
-  defp compile(abstract_forms, compiler_options) do
-    options = Enum.uniq([:return_errors, :debug_info | compiler_options])
+  defp compile(abstract_forms, compiler_options, loaded_filename, source_filename) do
+    options =
+      Enum.uniq([
+        {:source, source_filename},
+        :return_errors,
+        :debug_info,
+        :line_coverage | compiler_options
+      ])
 
     case :compile.forms(abstract_forms, options) do
       {:ok, module, binary} ->
-        load_binary(module, binary)
+        load_binary(module, loaded_filename, binary)
 
       {:ok, module, binary, _} ->
-        load_binary(module, binary)
+        load_binary(module, loaded_filename, binary)
 
       errors ->
         {:error, {:abstract_forms_invalid, abstract_forms, errors}}
@@ -239,7 +235,8 @@ defmodule Repatch.Recompiler do
             traverse(tail, exports, module, [form | acc], filter)
         end
 
-      {:attribute, _anno, :import, _} = keep ->
+      {:attribute, _anno, name, _} = keep
+      when name in ~w[import include include_lib record file]a ->
         traverse(tail, exports, module, [keep | acc], filter)
 
       {:function, _, name, _, _} = function when name in ~w[__info__ module_info]a ->
@@ -267,38 +264,44 @@ defmodule Repatch.Recompiler do
           traverse(tail, exports, module, acc, filter)
         end
 
-      _ ->
+      _other ->
         traverse(tail, exports, module, acc, filter)
     end
   end
 
   defp traverse([], exports, module, acc, _filter) do
     exports = Enum.uniq(exports)
+    anno = generated({1, 1})
 
     [
-      {:attribute, @generated, :module, module},
-      {:attribute, @generated, :export, exports} | Enum.reverse(acc)
+      {:attribute, anno, :module, module},
+      {:attribute, anno, :compile, :line_coverage},
+      {:attribute, anno, :export, exports} | Enum.reverse(acc)
     ]
   end
 
   defp function(module, anno, name, old_name, arity, old_clauses) do
+    new_anno = generated()
+
     clause = {
       :clause,
-      @generated,
+      new_anno,
       patterns(arity),
       [],
       body(module, name, arity, old_name)
     }
 
-    new = {:function, @generated, name, arity, [clause]}
+    new = {:function, new_anno, name, arity, [clause]}
     old = {:function, anno, old_name, arity, old_clauses}
     [new, old]
   end
 
   defp private_function(module, anno, name, old_name, private_name, arity, old_clauses) do
+    new_anno = generated()
+
     clause = {
       :clause,
-      @generated,
+      new_anno,
       patterns(arity),
       [],
       body(module, name, arity, old_name)
@@ -306,14 +309,14 @@ defmodule Repatch.Recompiler do
 
     private_clause = {
       :clause,
-      @generated,
+      new_anno,
       patterns(arity),
       [],
-      [{:call, @generated, {:atom, @generated, name}, patterns(arity)}]
+      [{:call, new_anno, {:atom, new_anno, name}, patterns(arity)}]
     }
 
-    new = {:function, @generated, name, arity, [clause]}
-    private = {:function, @generated, private_name, arity, [private_clause]}
+    new = {:function, new_anno, name, arity, [clause]}
+    private = {:function, new_anno, private_name, arity, [private_clause]}
     old = {:function, anno, old_name, arity, old_clauses}
 
     [new, private, old]
@@ -325,37 +328,37 @@ defmodule Repatch.Recompiler do
 
   defp patterns(arity) do
     Enum.map(1..arity, fn position ->
-      {:var, @generated, :"_arg#{position}"}
+      {:var, generated(), :"_arg#{position}"}
     end)
   end
 
   defp arguments(0, _arity) do
-    {nil, @generated}
+    {nil, generated()}
   end
 
   defp arguments(i, arity) do
-    {:cons, @generated, {:var, @generated, :"_arg#{arity - i + 1}"}, arguments(i - 1, arity)}
+    {:cons, generated(), {:var, generated(), :"_arg#{arity - i + 1}"}, arguments(i - 1, arity)}
   end
 
   defp body(module, name, arity, old_name) do
-    result = {:var, @generated, :"result#{:erlang.unique_integer([:positive])}"}
+    result = {:var, generated(), :"result#{:erlang.unique_integer([:positive])}"}
 
     [
-      {:case, @generated,
-       {:call, @generated,
-        {:remote, @generated, {:atom, @generated, Repatch}, {:atom, @generated, :dispatch}},
+      {:case, generated(),
+       {:call, generated(),
+        {:remote, generated(), {:atom, generated(), Repatch}, {:atom, generated(), :dispatch}},
         [
-          {:atom, @generated, module},
-          {:atom, @generated, name},
-          {:integer, @generated, arity},
+          {:atom, generated(), module},
+          {:atom, generated(), name},
+          {:integer, generated(), arity},
           arguments(arity, arity)
         ]},
        [
-         {:clause, @generated, [{:tuple, @generated, [{:atom, @generated, :ok}, result]}], [],
+         {:clause, generated(), [{:tuple, generated(), [{:atom, generated(), :ok}, result]}], [],
           [result]},
-         {:clause, @generated, [{:atom, @generated, :pass}], [],
+         {:clause, generated(), [{:atom, generated(), :pass}], [],
           [
-            {:call, @generated, {:atom, @generated, old_name}, patterns(arity)}
+            {:call, generated(), {:atom, generated(), old_name}, patterns(arity)}
           ]}
        ]}
     ]
@@ -384,5 +387,31 @@ defmodule Repatch.Recompiler do
 
   defp filter_compile_options(_) do
     []
+  end
+
+  defp generated do
+    [generated: true, location: {1, 1}]
+  end
+
+  defp generated({_line, _columnt} = location) do
+    [generated: true, location: location]
+  end
+
+  defp generated(line) when is_integer(line) do
+    [generated: true, location: line]
+  end
+
+  defp generated(list) when is_list(list) do
+    case Keyword.fetch(list, :location) do
+      {:ok, location} ->
+        [generated: true, location: location]
+
+      :error ->
+        [generated: true, location: {1, 1}]
+    end
+  end
+
+  defp generated(_anno) do
+    [generated: true, location: {1, 1}]
   end
 end

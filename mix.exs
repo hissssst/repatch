@@ -2,7 +2,7 @@ defmodule Repatch.MixProject do
   use Mix.Project
 
   def version do
-    "1.5.0"
+    "1.6.0"
   end
 
   def description do
@@ -11,6 +11,7 @@ defmodule Repatch.MixProject do
 
   def project do
     [
+      test_coverage: [tool: Repatch.CoverTool],
       app: :repatch,
       version: version(),
       elixir: "~> 1.12",
@@ -66,6 +67,8 @@ defmodule Repatch.MixProject do
 
   defp deps do
     [
+      {:ex2ms, "~> 1.7.0"},
+
       # # Uncomment for development
       {:dialyxir, "~> 1.0", only: :dev, runtime: false},
       {:credo, "~> 1.5", only: :dev, runtime: false},

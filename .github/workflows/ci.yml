@@ -10,8 +10,8 @@ jobs:
   test:
     strategy:
       matrix:
-        otp-version: ['26']
-        elixir-version: ['1.14', '1.15', '1.16']
+        otp-version: ['26', '27']
+        elixir-version: ['1.15', '1.16', '1.17', '1.18']
     name: CI
     runs-on: ubuntu-latest
 
@@ -35,8 +35,6 @@ jobs:
           deps
         restore-keys: |
           mix-${{ steps.setup-beam.outputs.otp-version }}-${{ steps.setup-beam.outputs.elixir-version }}-
-          mix-${{ steps.setup-beam.outputs.otp-version }}-
-          mix-
 
     - name: Download and compile dependencies
       run: |

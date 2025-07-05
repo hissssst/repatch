@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.0
+
+* Adds coverage support
+* Adds `notify` function and macro
+* Adds `history` function
+
 ## 1.5.0
 
 * Adds mock module generation

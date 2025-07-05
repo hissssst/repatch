@@ -47,6 +47,7 @@ defmodule Repatch do
   * `enable_history` (boolean) — Whether to enable calls history tracking. Defaults to `true`.
   * `recompile` (list of modules) — What modules should be recompiled before test starts. Modules are recompiled lazily by default. Defaults to `[]`.
   * `ignore_forbidden_module` (boolean) — Whether to ignore the warning about forbidden module being recompiled. Works only when `recompile` is specified. Defaults to `false`.
+  * `cover` (boolean) — Detected automatically by coverage tool, use with caution. Sets the `line_counters` native coverage mode.
   """
   @type setup_option ::
           recompile_option()
@@ -99,6 +100,13 @@ defmodule Repatch do
   """
   @spec setup([setup_option()]) :: :ok
   def setup(opts \\ []) do
+    cover =
+      Keyword.get_lazy(opts, :cover, fn -> :persistent_term.get(:repatch_line_counters, false) end)
+
+    if cover && function_exported?(:code, :set_coverage_mode, 1) do
+      apply(:code, :set_coverage_mode, [:line_counters])
+    end
+
     global_hooks_enabled = Keyword.get(opts, :enable_global)
     shared_hooks_enabled = Keyword.get(opts, :enable_shared)
     history_enabled = Keyword.get(opts, :enable_history)
@@ -188,6 +196,19 @@ defmodule Repatch do
   end
 
   @doc false
+  @spec delete_all_objects(atom()) :: :ok
+  def delete_all_objects(name) do
+    case :ets.whereis(name) do
+      :undefined ->
+        :ets.delete_all_objects(name)
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  @doc false
   @spec recompile(module(), [recompile_option() | any()]) :: :ok
   def recompile(module, opts \\ []) do
     if module in @forbidden_modules and not Keyword.get(opts, :ignore_forbidden_module, false) do
@@ -202,7 +223,7 @@ defmodule Repatch do
         debug("#{inspect(module)} awaiting recompilation")
         await_recompilation(module)
 
-      [{_, {:recompiled, _}}] ->
+      [{_, {:recompiled, _, _}}] ->
         debug("#{inspect(module)} found recompiled")
         :ok
 
@@ -210,20 +231,16 @@ defmodule Repatch do
         if :ets.insert_new(:repatch_module_states, {module, :recompiling}) do
           try do
             case Recompiler.recompile(module, opts) do
-              {:ok, bin} ->
-                :ets.insert(:repatch_module_states, {module, {:recompiled, bin}})
+              {:ok, bin, filename} ->
+                :ets.insert(:repatch_module_states, {module, {:recompiled, bin, filename}})
                 debug("Recompiled #{inspect(module)}")
+                :ok
 
               {:error, :nofile} ->
                 raise ArgumentError, "Module #{inspect(module)} does not exist"
 
               {:error, :binary_unavailable} ->
                 raise ArgumentError, "Binary for module #{inspect(module)} is unavailable"
-
-              {:error, {:abstract_forms_unavailable, _}} ->
-                raise ArgumentError,
-                      "Abstract forms for module #{inspect(module)} are unavailable. " <>
-                        "Please make sure that your modules are compiled with debug info"
             end
           rescue
             error ->
@@ -309,8 +326,8 @@ defmodule Repatch do
     |> :ets.tab2list()
     |> Enum.each(fn {module, state} ->
       case state do
-        {:recompiled, original_binary} ->
-          Recompiler.load_binary(module, original_binary)
+        {:recompiled, original_binary, original_filename} ->
+          Recompiler.load_binary(module, original_filename, original_binary)
 
         :recompiling ->
           await_recompilation(module)
@@ -320,12 +337,12 @@ defmodule Repatch do
       end
     end)
 
-    :ets.delete_all_objects(:repatch_module_states)
-    :ets.delete_all_objects(:repatch_state)
-    :ets.delete_all_objects(:repatch_history)
-    :ets.delete_all_objects(:repatch_global_hooks)
-    :ets.delete_all_objects(:repatch_shared_hooks)
-    :ets.delete_all_objects(:repatch_shared_allowances)
+    delete_all_objects(:repatch_module_states)
+    delete_all_objects(:repatch_state)
+    delete_all_objects(:repatch_history)
+    delete_all_objects(:repatch_global_hooks)
+    delete_all_objects(:repatch_shared_hooks)
+    delete_all_objects(:repatch_shared_allowances)
 
     :ok
   end
@@ -591,6 +608,124 @@ defmodule Repatch do
   end
 
   @typedoc """
+  Opaque value returned from `notify/4` or `notify/2`.
+  Can be used to receive the notification about the function call.
+  """
+  @opaque notify_ref :: {module(), atom(), arity(), reference()}
+
+  @doc """
+  Patches a function to send the message to the calling process
+  every time this function is successfully executed. Result
+  of `notify/4` can be used to be receivied on.
+
+  ## Example
+
+      iex> notification = Repatch.notify(DateTime, :utc_now, 0)
+      iex> receive do ^notification -> :got after 0 -> :none end
+      :none
+      iex> DateTime.utc_now()
+      iex> receive do ^notification -> :got after 0 -> :none end
+      :got
+
+  If you want to stop receiving notifications, you can call `restore/4`.
+
+  It is recommended to not use this function and instead use `m::trace` module
+  """
+  @doc since: "1.6.0"
+  @spec notify(module(), atom(), arity() | [term()], [patch_option()]) :: notify_ref()
+  def notify(module, function, args_or_arity, opts \\ []) do
+    recompile(module, opts)
+    owner = self()
+
+    arity =
+      case args_or_arity do
+        arity when is_integer(arity) ->
+          arity
+
+        args when is_list(args) ->
+          length(args)
+      end
+
+    opaque_ref = {module, function, arity, make_ref()}
+
+    hook =
+      case args_or_arity do
+        arity when is_integer(arity) ->
+          fn args ->
+            result = __MODULE__.super(module, function, args)
+            send(owner, opaque_ref)
+            {:ok, result}
+          end
+
+        args when is_list(args) ->
+          fn called_args ->
+            case called_args do
+              ^args ->
+                result = __MODULE__.super(module, function, called_args)
+                send(owner, opaque_ref)
+                {:ok, result}
+
+              _ ->
+                {:ok, __MODULE__.super(module, function, called_args)}
+            end
+          end
+      end
+
+    add_hook(module, function, arity, hook, opts)
+    opaque_ref
+  end
+
+  @doc """
+  Patches a function to send the message to the calling process
+  every time this function is successfully executed. Result
+  of `notify/2` can be used to be receivied on.
+
+  ## Example
+
+      iex> notification = Repatch.notify DateTime.utc_now()
+      iex> receive do ^notification -> :got after 0 -> :none end
+      :none
+      iex> DateTime.utc_now()
+      iex> receive do ^notification -> :got after 0 -> :none end
+      :got
+  """
+  @doc since: "1.6.0"
+  defmacro notify(dotcall, opts \\ [])
+
+  defmacro notify({{:., _, [module, function]}, _meta, args}, opts) do
+    arity = length(args)
+
+    quote do
+      module = unquote(module)
+      function = unquote(function)
+      opts = unquote(opts)
+      unquote(__MODULE__).recompile(module, opts)
+      owner = self()
+      opaque_ref = {module, function, unquote(arity), make_ref()}
+
+      hook =
+        fn called_args ->
+          case called_args do
+            unquote(args) ->
+              result = unquote(__MODULE__).super(module, function, called_args)
+              send(owner, opaque_ref)
+              {:ok, result}
+
+            _ ->
+              {:ok, unquote(__MODULE__).super(module, function, called_args)}
+          end
+        end
+
+      unquote(__MODULE__).add_hook(module, function, unquote(arity), hook, opts)
+      opaque_ref
+    end
+  end
+
+  defmacro notify(quoted, _opts) do
+    raise_wrong_dotcall(quoted)
+  end
+
+  @typedoc """
   Options passed in the `patch/4` function.
 
   * `ignore_forbidden_module` (boolean) — Whether to ignore the warning about forbidden module is being spied. Defaults to `false`.
@@ -737,7 +872,7 @@ defmodule Repatch do
     end
 
     with [{_, tags}] <- :ets.lookup(:repatch_state, {module, function, arity, self()}) do
-      tags = tags -- [:patched, :local, :shared, :global]
+      tags = tags -- [:patched, mode]
       :ets.insert(:repatch_state, {{module, function, arity, self()}, tags})
     end
 
@@ -772,11 +907,18 @@ defmodule Repatch do
       iex> Looper.call(pid, Range, :new, [1, 3])
       [1, 2, 3]
   """
-  @spec allow(pid(), pid(), [allow_option()]) :: :ok
+  @spec allow(
+          pid() | GenServer.name() | {atom(), node()},
+          pid() | GenServer.name() | {atom(), node()},
+          [allow_option()]
+        ) :: :ok
   def allow(owner, allowed, opts \\ []) do
     unless :persistent_term.get(:repatch_shared_hooks_enabled, true) do
       raise ArgumentError, "Shared hooks are disabled!"
     end
+
+    owner = resolve_pid(owner)
+    allowed = resolve_pid(allowed)
 
     final_owner =
       case :ets.lookup(:repatch_shared_allowances, owner) do
@@ -844,7 +986,7 @@ defmodule Repatch do
   end
 
   @doc """
-  Lists current owner of the allowed process (or `self()` by default).
+  Returns current owner of the allowed process (or `self()` by default) if any.
   Works only when shared mode is enabled.
 
   Please note that deep allowances are returned as the final owner of the process.
@@ -885,16 +1027,18 @@ defmodule Repatch do
   @spec info(module(), atom(), arity(), :any) :: %{pid() => [tag()]}
   def info(module, function, arity, pid \\ self())
 
-  def info(module, function, arity, pid) when is_pid(pid) do
+  def info(module, function, arity, :any) do
+    results = :ets.match_object(:repatch_state, {{module, function, arity, :_}, :_})
+    Map.new(results, fn {{_, _, _, pid}, tags} -> {pid, tags} end)
+  end
+
+  def info(module, function, arity, name) do
+    pid = resolve_pid(name)
+
     case :ets.lookup(:repatch_state, {module, function, arity, pid}) do
       [{_, tags}] -> tags
       _ -> []
     end
-  end
-
-  def info(module, function, arity, :any) do
-    results = :ets.match_object(:repatch_state, {{module, function, arity, :_}, :_})
-    Map.new(results, fn {{_, _, _, pid}, tags} -> {pid, tags} end)
   end
 
   @typedoc """
@@ -928,20 +1072,36 @@ defmodule Repatch do
   end
 
   @typedoc """
-  Options passed in the `called?/4` function. When multiple options are specified, they are combined in logical AND fashion.
+  Options passed in the `history/1` function. When multiple options are specified, they are combined in logical AND fashion.
 
-  * `by` (`:any` | pid) — what process called the function. Defaults to `self()`.
+  * `by` (`t:GenServer.name/0` | `:any` | pid) — what process called the function. Defaults to `self()`.
+  * `before` (`:erlang.monotonic_time/0` timestamp) — upper boundary of when the function was called.
+  * `after` (`:erlang.monotonic_time/0` timestamp) — lower boundary of when the function was called.
+  """
+  @type history_option ::
+          {:by, GenServer.name() | pid() | :any}
+          | {:after, monotonic_time_native :: integer()}
+          | {:before, monotonic_time_native :: integer()}
+          | {:module, module()}
+          | {:function, atom()}
+          | {:arity, arity()}
+          | {:args, [term()]}
+
+  @typedoc """
+  Options passed in the `called?/2` and `called?/4`. When multiple options are specified, they are combined in logical AND fashion.
+
+  * `by` (`t:GenServer.name/0` | `:any` | pid) — what process called the function. Defaults to `self()`.
   * `at_least` (`:once` | integer) — at least how many times the function was called. Defaults to `:once`.
   * `exactly` (`:once` | integer) — exactly how many times the function was called.
   * `before` (`:erlang.monotonic_time/0` timestamp) — upper boundary of when the function was called.
   * `after` (`:erlang.monotonic_time/0` timestamp) — lower boundary of when the function was called.
   """
   @type called_check_option ::
-          {:by, pid() | :any}
-          | {:at_least, :once | pos_integer()}
-          | {:exactly, :once | pos_integer()}
+          {:by, GenServer.name() | pid() | :any}
           | {:after, monotonic_time_native :: integer()}
           | {:before, monotonic_time_native :: integer()}
+          | {:at_least, :once | pos_integer()}
+          | {:exactly, :once | pos_integer()}
 
   @doc """
   Checks if the function call is present in the history or not.
@@ -949,19 +1109,17 @@ defmodule Repatch do
 
   ## Example
 
-      iex> Path.join("left", "right")
-      "left/right"
+      iex> Repatch.spy(Path)
       iex> Repatch.called?(Path, :join, 2)
       false
-      iex> Repatch.patch(Path, :join, fn left, right -> left <> "|" <> right end)
       iex> Path.join("left", "right")
-      "left|right"
+      "left/right"
       iex> Repatch.called?(Path, :join, 2)
       true
       iex> Repatch.called?(Path, :join, 2, exactly: :once)
       true
       iex> Path.join("left", "right")
-      "left|right"
+      "left/right"
       iex> Repatch.called?(Path, :join, 2, exactly: :once)
       false
 
@@ -970,19 +1128,30 @@ defmodule Repatch do
   """
   @spec called?(module(), atom(), arity() | [term()], [called_check_option()]) :: boolean()
   def called?(module, function, arity_or_args, opts \\ []) do
+    {exactly, at_least, afterr, before, pid} = parse_called_opts(opts)
+
+    {arity, args} =
+      case arity_or_args do
+        args when is_list(args) ->
+          {length(args), args}
+
+        arity when is_integer(arity) and arity >= 0 ->
+          {arity, :_}
+      end
+
+    module
+    |> called_pattern(function, arity, pid, args, 1, afterr, before)
+    |> called_one(exactly, at_least)
+  end
+
+  @doc false
+  def parse_called_opts(opts) do
+    {afterr, before, pid} = parse_history_opts(opts)
+
     exactly = intify(Keyword.get(opts, :exactly))
     at_least = intify(Keyword.get(opts, :at_least, 1))
-    afterr = Keyword.get(opts, :after)
-    before = Keyword.get(opts, :before)
-    by = Keyword.get(opts, :by, self())
 
     cond do
-      not :persistent_term.get(:repatch_history_enabled, true) ->
-        raise ArgumentError, "History disabled"
-
-      before && afterr && afterr > before ->
-        raise ArgumentError, "Can't have after more than before. Got #{afterr} > #{before}"
-
       exactly && at_least && at_least > exactly ->
         raise ArgumentError,
               "When specifying exactly and at_least options, make sure that " <>
@@ -995,54 +1164,229 @@ defmodule Repatch do
         :ok
     end
 
-    {arity, args} =
-      case arity_or_args do
-        args when is_list(args) ->
-          {length(args), args}
+    {exactly, at_least, afterr, before, pid}
+  end
 
-        arity when is_integer(arity) and arity >= 0 ->
-          {arity, :_}
-      end
+  defp parse_history_opts(opts) do
+    afterr = Keyword.get(opts, :after)
+    before = Keyword.get(opts, :before)
+    by = Keyword.get(opts, :by, self())
+
+    cond do
+      not :persistent_term.get(:repatch_history_enabled, true) ->
+        raise ArgumentError, "History disabled"
+
+      before && afterr && afterr > before ->
+        raise ArgumentError, "Can't have after more than before. Got #{afterr} > #{before}"
+
+      true ->
+        :ok
+    end
 
     pid =
       case by do
         :any ->
           :_
 
-        pid when is_pid(pid) ->
-          pid
-
         other ->
-          raise ArgumentError, "Expected by option to be pid or `:any`. Got #{inspect(other)}"
+          resolve_pid(other)
       end
 
-    module
-    |> called_pattern(function, arity, pid, args, afterr, before)
-    |> called_one(exactly, at_least)
+    {afterr, before, pid}
   end
 
-  defp called_pattern(module, function, arity, pid, args, nil, nil) do
+  @doc """
+  Checks if the function call is present in the history or not.
+  First argument of this macro must be in a `Module.function(arguments)` format
+  and `arguments` can be a pattern. It is also possible to specify a guard like in example.
+
+  See `t:called_check_option/0` for available options.
+
+  ## Example
+
+      iex> Repatch.spy(Path)
+      iex> Repatch.called? Path.split("path/to")
+      false
+      iex> Path.split("path/to")
+      ["path", "to"]
+      iex> Repatch.called? Path.split("path/to")
+      true
+      iex> Repatch.called? Path.split(string) when is_binary(string)
+      true
+      iex> Repatch.called? Path.split("path/to"), exactly: :once
+      true
+      iex> Path.split("path/to")
+      ["path", "to"]
+      iex> Repatch.called? Path.split("path/to"), exactly: :once
+      false
+
+  Works only when history is enabled in setup.
+  Please make sure that module is spied on or at least patched before querying history on it.
+  """
+  @doc since: "1.6.0"
+  defmacro called?(dotcall, opts \\ []) do
+    {module, function, args, guard} =
+      case dotcall do
+        {{:., _dotmeta, [module, function]}, _meta, args} ->
+          {module, function, args, true}
+
+        {:when, _, [{{:., _dotmeta, [module, function]}, _meta, args}, guard]} ->
+          {module, function, args, guard}
+
+        quoted ->
+          raise_wrong_dotcall(quoted)
+      end
+
+    arity = length(args)
+    {args, maxa, guards} = toms(args, guard, __CALLER__)
+
+    quote do
+      {exactly, at_least, afterr, before, pid} =
+        unquote(__MODULE__).parse_called_opts(unquote(opts))
+
+      {pattern, guard, selection} =
+        unquote(__MODULE__).called_pattern(
+          unquote(module),
+          unquote(function),
+          unquote(arity),
+          pid,
+          unquote(args),
+          unquote(maxa + 1),
+          afterr,
+          before
+        )
+
+      ms = {pattern, guard ++ unquote(guards), selection}
+      unquote(__MODULE__).called_one(ms, exactly, at_least)
+    end
+  end
+
+  defp toms(args, guard, env) do
+    require Ex2ms
+
+    args = Macro.expand(args, %Macro.Env{env | context: :match})
+    guard = Macro.expand(guard, %Macro.Env{env | context: :guard})
+
+    [{:{}, _, [{:{}, _, [args]}, guards, _]}] =
+      quote do
+        Ex2ms.fun do
+          {unquote(args)} when unquote(guard) -> :ok
+        end
+      end
+      |> Macro.expand_once(__ENV__)
+
+    {_args, maxi} =
+      args
+      |> Macro.postwalk(0, fn
+        atom, acc when is_atom(atom) ->
+          acc =
+            with(
+              "$" <> s <- Atom.to_string(atom),
+              {i, ""} <- Integer.parse(s)
+            ) do
+              max(i, acc)
+            else
+              _ -> acc
+            end
+
+          {atom, acc}
+
+        other, acc ->
+          {other, acc}
+      end)
+
+    {args, maxi, guards}
+  end
+
+  @doc """
+  Queries a history of all calls from current or passed process.
+  It is also possible to filter by module, function name, arity, args
+  and timestamps.
+
+  See `t:history_option/0` for available options.
+
+  ## Example
+
+      iex> Repatch.spy(Path)
+      iex> Repatch.spy(MapSet)
+      iex> Repatch.history()
+      []
+      iex> Path.rootname("file.ex")
+      "file"
+      iex> MapSet.new()
+      MapSet.new([])
+      iex> Repatch.history(module: Path, function: :rootname)
+      [
+        {Path, :rootname, ["file.ex"], -576460731414614326}
+      ]
+      iex> Repatch.history()
+      [
+        {Path, :rootname, ["file.ex"], -576460731414614326},
+        {MapSet, :new, [], -576460731414614300},
+        ...
+      ]
+
+  Works only when history is enabled in setup.
+  Please make sure that module is spied on or at least patched before querying history on it.
+  """
+  @doc since: "1.6.0"
+  @spec history([history_option()]) :: [
+          {module :: module(), function :: atom(), args :: [term()],
+           monotonic_timestamp :: integer()}
+        ]
+  def history(opts \\ []) do
+    {afterr, before, pid} = parse_history_opts(opts)
+
+    module = Keyword.get(opts, :module, :"$1")
+    function = Keyword.get(opts, :function, :"$2")
+    arity = Keyword.get(opts, :arity, :_)
+    args = Keyword.get(opts, :args, :"$3")
+
+    guard =
+      case {afterr, before} do
+        {nil, nil} ->
+          []
+
+        {afterr, nil} ->
+          [{:>=, :"$4", afterr}]
+
+        {nil, before} ->
+          [{:"=<", :"$4", before}]
+
+        {afterr, before} ->
+          [{:>=, :"$4", afterr}, {:"=<", :"$4", before}]
+      end
+
+    ms =
+      {{{module, function, arity, pid}, :"$4", args}, guard, [{{module, function, args, :"$4"}}]}
+
+    :ets.select(:repatch_history, [ms])
+  end
+
+  @doc false
+  def called_pattern(module, function, arity, pid, args, _index, nil, nil) do
     {{{module, function, arity, pid}, :_, args}, [], [:"$$"]}
   end
 
-  defp called_pattern(module, function, arity, pid, args, nil, before) do
-    {{{module, function, arity, pid}, :"$1", args}, [{:"=<", :"$1", before}], [:"$$"]}
+  def called_pattern(module, function, arity, pid, args, index, nil, before) do
+    {{{module, function, arity, pid}, :"$#{index}", args}, [{:"=<", :"$1", before}], [:"$$"]}
   end
 
-  defp called_pattern(module, function, arity, pid, args, afterr, nil) do
-    {{{module, function, arity, pid}, :"$1", args}, [{:>=, :"$1", afterr}], [:"$$"]}
+  def called_pattern(module, function, arity, pid, args, index, afterr, nil) do
+    {{{module, function, arity, pid}, :"$#{index}", args}, [{:>=, :"$#{index}", afterr}], [:"$$"]}
   end
 
-  defp called_pattern(module, function, arity, pid, args, afterr, before) do
-    {{{module, function, arity, pid}, :"$1", args},
-     [{:>=, :"$1", afterr}, {:"=<", :"$1", before}], [:"$$"]}
+  def called_pattern(module, function, arity, pid, args, index, afterr, before) do
+    {{{module, function, arity, pid}, :"$#{index}", args},
+     [{:>=, :"$#{index}", afterr}, {:"=<", :"$#{index}", before}], [:"$$"]}
   end
 
-  defp called_one(key_pattern, nil, at_least) do
+  @doc false
+  def called_one(key_pattern, nil, at_least) do
     called_at_least(key_pattern, at_least)
   end
 
-  defp called_one(key_pattern, exactly, _at_least) do
+  def called_one(key_pattern, exactly, _at_least) do
     called_exactly(key_pattern, exactly)
   end
 
@@ -1074,8 +1418,12 @@ defmodule Repatch do
         receive after: (10 -> [])
         await_recompilation(module)
 
-      _ ->
+      [{_, {:recompiled, _, _}}] ->
         :ok
+
+      [] ->
+        raise CompileError,
+          description: "Compilation of #{module} failed in another process"
     end
   end
 
@@ -1225,6 +1573,53 @@ defmodule Repatch do
       end
     else
       :pass
+    end
+  end
+
+  defmacrop raise_not_name(x) do
+    quote do
+      raise ArgumentError,
+            "Expected pid, valid `t:GenServer.name` or `:any`. Got #{inspect(unquote(x))}"
+    end
+  end
+
+  defp resolve_pid(pid) when is_pid(pid), do: pid
+
+  defp resolve_pid(name) when is_atom(name) do
+    with :undefined <- :erlang.whereis(name) do
+      raise_not_name(name)
+    end
+  end
+
+  defp resolve_pid({:global, name}) do
+    case :global.whereis_name(name) do
+      pid when is_pid(pid) ->
+        pid
+
+      :undefined ->
+        raise_not_name({:global, name})
+    end
+  end
+
+  defp resolve_pid({:via, module, name} = fullname) do
+    case module.whereis_name(name) do
+      pid when is_pid(pid) ->
+        pid
+
+      :undefined ->
+        raise_not_name(fullname)
+    end
+  end
+
+  defp resolve_pid({name, local}) when is_atom(name) and local == node() do
+    with :undefined <- :erlang.whereis(name) do
+      raise_not_name({name, local})
+    end
+  end
+
+  defp resolve_pid({name, node}) when is_atom(name) and is_atom(node) do
+    with :undefined <- :erpc.call(node, :erlang, :whereis, [name]) do
+      raise_not_name({name, node})
     end
   end
 end

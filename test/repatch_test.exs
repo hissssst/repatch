@@ -4,7 +4,18 @@ defmodule RepatchTest do
   require X
   require Repatch
 
-  doctest Repatch, except: [setup: 1, setup: 0, restore_all: 0]
+  doctest Repatch,
+    except: [
+      notify: 1,
+      notify: 2,
+      notify: 3,
+      notify: 4,
+      setup: 1,
+      setup: 0,
+      restore_all: 0,
+      history: 0,
+      history: 1
+    ]
 
   alias Repatch.Looper
 
@@ -43,7 +54,7 @@ defmodule RepatchTest do
   end
 
   test "patch works on forbidden modules with option" do
-    Repatch.patch(Keyword, :new, [ignore_forbidden_module: true], fn -> [] end)
+    Repatch.patch(Agent, :stop, [ignore_forbidden_module: true], fn _agent -> [] end)
   end
 
   test "patching generated fails" do

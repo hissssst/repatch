@@ -22,7 +22,7 @@ defmodule Repatch.Expectations do
   """
 
   defmodule Empty do
-    @moduledoc "This expception is raised when function is called without any expectations left in queue"
+    @moduledoc "This exception is raised when function is called without any expectations left in queue"
     defexception [:message, :module, :function, :arity]
 
     def message(%{message: message, module: module, function: function, arity: arity}) do
@@ -121,9 +121,12 @@ defmodule Repatch.Expectations do
 
   ## Notes
 
-  * When function called without any expectations empty, it will raise `RuntimeError`
+  * `expect/4` supports isolation modes just like `Repatch.patch/4` does.
+
+  * When function called without any expectations empty, it will raise `Repatch.Expectations.Empty`.
+
   * Calling `Repatch.patch/4` with `force: true` will override all `expect/2` calls in the current isolation.
-  * It works with isolation just like the `Repatch.patch/4` does.
+
   * To validate the `exactly` and `at_least` options, you can use the
   `expectations_empty?/0` function or use `Repatch.ExUnit` with `assert_expectations` option.
   """

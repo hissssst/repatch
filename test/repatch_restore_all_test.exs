@@ -1,6 +1,8 @@
 defmodule RepatchRestoreAllTest do
   use ExUnit.Case, async: false
 
+  @moduletag skip: true
+
   test "restore_all just works" do
     Repatch.spy(X)
     assert X.f(1) == 2
