@@ -3,8 +3,6 @@ defmodule RepatchSetupTest do
 
   alias Repatch.Looper
 
-  @moduletag skip: true
-
   setup do
     Repatch.restore_all()
 

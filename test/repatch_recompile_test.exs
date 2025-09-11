@@ -3,10 +3,9 @@ defmodule RepatchRecompileTest do
 
   alias RecompileSubject, as: Subject
 
-  @moduletag skip: true
-
   setup do
     Repatch.restore_all()
+    Repatch.setup()
     on_exit(fn -> Repatch.restore_all() end)
   end
 
@@ -62,7 +61,6 @@ defmodule RepatchRecompileTest do
     test "recompile" do
       Repatch.setup(recompile: [Subject], enable_history: true)
       assert Subject.f(1) == 2
-      # , exactly: :once)
       assert Repatch.called?(Subject, :f, 1)
     end
   end

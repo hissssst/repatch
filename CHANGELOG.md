@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.1
+
+* Fixes a bug where `restore_all` failed to remove state
+* Fixes a bug caused by code purging latency, adding a 150ms timeout to await for code to be purged
+* Fixes a bug where `restore_all` failed to return module back to original implementation
+
 ## 1.6.0
 
 * Adds coverage support

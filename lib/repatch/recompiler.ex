@@ -109,12 +109,36 @@ defmodule Repatch.Recompiler do
   def load_binary(module, filename, binary) do
     sticky = unstick_module(module)
 
-    with {:module, ^module} <- :code.load_binary(module, filename, binary) do
-      if sticky do
-        :code.stick_mod(module)
-      end
+    case do_load_binary(module, filename, binary, 3) do
+      {:module, ^module} ->
+        if sticky do
+          :code.stick_mod(module)
+        end
 
-      :ok
+        :ok
+
+      {:error, :not_purged} ->
+        IO.warn("""
+        It seems like the module #{inspect(module)} is being used in other process for more than a second.
+        Please consider adding this module for recompilation as the `recompile` option in `Repatch.setup/1` call.
+        """)
+
+        {:error, :not_purged}
+
+      other ->
+        other
+    end
+  end
+
+  defp do_load_binary(module, filename, binary, 1) do
+    :code.load_binary(module, filename, binary)
+  end
+
+  defp do_load_binary(module, filename, binary, attempt) do
+    with {:error, :not_purged} <- :code.load_binary(module, filename, binary) do
+      :code.purge(module)
+      :code.delete(module)
+      receive after: (500 -> do_load_binary(module, filename, binary, attempt - 1))
     end
   end
 

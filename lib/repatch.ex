@@ -45,7 +45,7 @@ defmodule Repatch do
   * `enable_global` (boolean) — Whether to allow global mocks in test suites. Defaults to `false`.
   * `enable_shared` (boolean) — Whether to allow shared mocks in test suites. Defaults to `true`.
   * `enable_history` (boolean) — Whether to enable calls history tracking. Defaults to `true`.
-  * `recompile` (list of modules) — What modules should be recompiled before test starts. Modules are recompiled lazily by default. Defaults to `[]`.
+  * `recompile` (module or a list of modules) — What modules should be recompiled before test starts. Modules are recompiled lazily by default. Defaults to `[]`.
   * `ignore_forbidden_module` (boolean) — Whether to ignore the warning about forbidden module being recompiled. Works only when `recompile` is specified. Defaults to `false`.
   * `cover` (boolean) — Detected automatically by coverage tool, use with caution. Sets the `line_counters` native coverage mode.
   """
@@ -200,10 +200,10 @@ defmodule Repatch do
   def delete_all_objects(name) do
     case :ets.whereis(name) do
       :undefined ->
-        :ets.delete_all_objects(name)
         :ok
 
       _ ->
+        true = :ets.delete_all_objects(name)
         :ok
     end
   end
@@ -222,6 +222,7 @@ defmodule Repatch do
       [{_, :recompiling}] ->
         debug("#{inspect(module)} awaiting recompilation")
         await_recompilation(module)
+        :ok
 
       [{_, {:recompiled, _, _}}] ->
         debug("#{inspect(module)} found recompiled")
@@ -249,6 +250,7 @@ defmodule Repatch do
           end
         else
           await_recompilation(module)
+          :ok
         end
     end
   end
@@ -327,10 +329,11 @@ defmodule Repatch do
     |> Enum.each(fn {module, state} ->
       case state do
         {:recompiled, original_binary, original_filename} ->
-          Recompiler.load_binary(module, original_filename, original_binary)
+          :ok = Recompiler.load_binary(module, original_filename, original_binary)
 
         :recompiling ->
-          await_recompilation(module)
+          {:recompiled, original_binary, original_filename} = await_recompilation(module)
+          :ok = Recompiler.load_binary(module, original_filename, original_binary)
 
         _ ->
           :ok
@@ -343,6 +346,8 @@ defmodule Repatch do
     delete_all_objects(:repatch_global_hooks)
     delete_all_objects(:repatch_shared_hooks)
     delete_all_objects(:repatch_shared_allowances)
+
+    debug("All restored")
 
     :ok
   end
@@ -784,7 +789,9 @@ defmodule Repatch do
     macro_name = "MACRO-#{function}"
     super_name = Recompiler.super_name_string(function)
 
-    Enum.find_value(module.module_info(:exports), fn {function, function_arity} ->
+    :exports
+    |> module.module_info()
+    |> Enum.find_value(fn {function, function_arity} ->
       case atom_to_binary(function) do
         ^macro_name when function_arity == arity ->
           :macro
@@ -1418,8 +1425,8 @@ defmodule Repatch do
         receive after: (10 -> [])
         await_recompilation(module)
 
-      [{_, {:recompiled, _, _}}] ->
-        :ok
+      [{_, {:recompiled, _, _} = state}] ->
+        state
 
       [] ->
         raise CompileError,
@@ -1488,7 +1495,7 @@ defmodule Repatch do
     if :persistent_term.get(:repatch_history_enabled, true) do
       ts = :erlang.monotonic_time()
       :ets.insert(:repatch_history, {{module, function, arity, self()}, ts, args})
-      debug("Inserted history #{ts}")
+      # debug("Inserted history #{ts}")
     end
 
     case :erlang.get(:repatch_bypass_hooks) do
@@ -1545,7 +1552,7 @@ defmodule Repatch do
         dispatch_callers(tail, module, function, arity, args)
 
       [{_, hook}] when is_function(hook) ->
-        debug("Dispatched allowance with caller owner #{inspect(pid)}")
+        debug("Dispatched allowance with caller owner")
         hook.(args)
     end
   end

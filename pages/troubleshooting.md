@@ -17,6 +17,51 @@ it with some modes or options disabled and used these modes or options later.
 
 To fix it, add correct `Repatch.setup` call.
 
+## System module patching
+
+It looks like
+```erlang
+{error,badarg,[{ets,lookup,[repatch_global_hooks,{'Elixir.System',no_halt,0}],[{error_info,#{cause=>id,module=>erl_stdlib_errors}}]},{'Elixir.Repatch',dispatch_global,4,[{file,"lib/repatch.ex"},{line,1573}]},{'Elixir.System',no_halt,0,[{file,"lib/system.ex"},{line,1}]},{'Elixir.Kernel.CLI',run,1,[{file,"lib/kernel/cli.ex"},{line,56}]},{init,start_it,1,[]},{init,start_em,1,[]},{init,do_boot,3,[]}]}
+Runtime terminating during boot ({badarg,[{ets,lookup,[repatch_global_hooks,{'Elixir.System',no_halt,0}],[{error_info,#{cause=>id,module=>erl_stdlib_errors}}]},{'Elixir.Repatch',dispatch_global,4,[{file,"lib/repatch.ex"},{line,1573}]},{'Elixir.System',no_halt,0,[{file,"lib/system.ex"},{line,1}]},{'Elixir.Kernel.CLI',run,1,[{file,"lib/kernel/cli.ex"},{line,56}]},{init,start_it,1,[]},{init,start_em,1,[]},{init,do_boot,3,[]}]})
+```
+
+and it can be fixed by specifying the System functions which can't be recompiled
+since ExUnit uses them internally. The working example looks like this
+
+```elixir
+Repatch.setup(
+  recompile: [System],
+  recompile_except: [
+    {System, :no_halt, 0},
+    {System, :halt, 1}
+  ]
+)
+```
+
+## no case clause matching: {:error, :not_purged}
+
+It looks like
+
+```elixir
+** (CaseClauseError) no case clause matching: {:error, :not_purged}
+code: Repatch.patch(Req, :get, fn _, _ ->
+stacktrace:
+ (repatch 1.6.0) lib/repatch.ex:233: Repatch.recompile/2
+ (repatch 1.6.0) lib/repatch.ex:760: Repatch.patch/4
+```
+
+and it is caused when frequently used module is patched and
+during the patch, some of the processes calls the module and prevents it from
+purging completely.
+
+It can be fixed by specifying this module in the `recompile` option of `Repatch.setup/1` call.
+
+For example,
+
+```elixir
+Repatch.setup(recompile: [Req])
+```
+
 ## Inconsistent tests performance
 
 If you run your tests with options like `--slowest` and each run takes different
