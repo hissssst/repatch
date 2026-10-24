@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+* Adds `enable_history: :owned` setup option, which records only the calls made for a process which spied on or patched the module (itself, its `$callers`, its allowances, or any process for a `:global` patch)
+* Fixes `cleanup/1` leaving the calls of the process' tasks and allowed processes in the history forever
+* Enables `write_concurrency` on the history table, which concurrent tests write at the same time
+
 ## 1.6.1
 
 * Fixes a bug where `restore_all` failed to remove state

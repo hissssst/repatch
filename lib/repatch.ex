@@ -44,7 +44,9 @@ defmodule Repatch do
 
   * `enable_global` (boolean) — Whether to allow global mocks in test suites. Defaults to `false`.
   * `enable_shared` (boolean) — Whether to allow shared mocks in test suites. Defaults to `true`.
-  * `enable_history` (boolean) — Whether to enable calls history tracking. Defaults to `true`.
+  * `enable_history` (boolean or `:owned`) — Whether to enable calls history tracking. Defaults to `true`.
+  `:owned` records only the calls made for a process which spied on or patched the module (see `spy/2`),
+  which keeps the history cheap in large async test suites.
   * `recompile` (module or a list of modules) — What modules should be recompiled before test starts. Modules are recompiled lazily by default. Defaults to `[]`.
   * `ignore_forbidden_module` (boolean) — Whether to ignore the warning about forbidden module being recompiled. Works only when `recompile` is specified. Defaults to `false`.
   * `cover` (boolean) — Detected automatically by coverage tool, use with caution. Sets the `line_counters` native coverage mode.
@@ -53,7 +55,7 @@ defmodule Repatch do
           recompile_option()
           | {:enable_global, boolean()}
           | {:enable_shared, boolean()}
-          | {:enable_history, boolean()}
+          | {:enable_history, boolean() | :owned}
           | {:recompile, module() | [module()]}
 
   @typedoc """
@@ -142,11 +144,17 @@ defmodule Repatch do
 
     case history_enabled do
       nil ->
-        setup_table(:repatch_history, [:duplicate_bag, :named_table, :public])
+        setup_history_tables()
 
       true ->
-        setup_table(:repatch_history, [:duplicate_bag, :named_table, :public])
+        setup_history_tables()
         :persistent_term.put(:repatch_history_enabled, true)
+        :persistent_term.put(:repatch_history_owned, false)
+
+      :owned ->
+        setup_history_tables()
+        :persistent_term.put(:repatch_history_enabled, true)
+        :persistent_term.put(:repatch_history_owned, true)
 
       false ->
         :persistent_term.put(:repatch_history_enabled, false)
@@ -180,6 +188,17 @@ defmodule Repatch do
     debug("setup successful")
 
     :ok
+  end
+
+  # `:repatch_history_owners` holds `{{module, pid}, pid}` for every process which spied on
+  # or patched the module (and `{{module, :global}, pid}` for global patches). Every call is
+  # recorded with the owner it was made for, so that `cleanup/1` of the owner removes calls
+  # of its tasks and allowed processes too, and with `enable_history: :owned` only those
+  # calls are recorded. Concurrent tests write history at the same time, hence `write_concurrency`
+  defp setup_history_tables do
+    setup_table(:repatch_history, [:duplicate_bag, :named_table, :public, write_concurrency: true])
+
+    setup_table(:repatch_history_owners, [:set, :named_table, :public, read_concurrency: true])
   end
 
   @doc false
@@ -303,8 +322,35 @@ defmodule Repatch do
 
   defp cleanup_history(pid) do
     if :persistent_term.get(:repatch_history_enabled, true) do
-      :ets.match_delete(:repatch_history, {{:_, :_, :_, pid}, :_, :_})
+      # Owners first, so that nothing is recorded for the pid after its calls are gone
+      :ets.match_delete(:repatch_history_owners, {:_, pid})
+
+      # Calls the pid made and calls made for it (by its tasks, allowed processes and so on),
+      # in one pass over the table
+      :ets.select_delete(:repatch_history, [
+        {{{:_, :_, :_, :"$1"}, :_, :_, :"$2"},
+         [{:orelse, {:"=:=", :"$1", pid}, {:"=:=", :"$2", pid}}], [true]}
+      ])
     end
+  end
+
+  defp clear_history(pid) do
+    if :persistent_term.get(:repatch_history_enabled, true) do
+      :ets.match_delete(:repatch_history, {{:_, :_, :_, pid}, :_, :_, :_})
+    end
+  end
+
+  defp track_history(module, mode) do
+    if :persistent_term.get(:repatch_history_enabled, true) do
+      owner = self()
+      :ets.insert(:repatch_history_owners, {{module, owner}, owner})
+
+      if mode == :global do
+        :ets.insert(:repatch_history_owners, {{module, :global}, owner})
+      end
+    end
+
+    :ok
   end
 
   @doc """
@@ -343,6 +389,7 @@ defmodule Repatch do
     delete_all_objects(:repatch_module_states)
     delete_all_objects(:repatch_state)
     delete_all_objects(:repatch_history)
+    delete_all_objects(:repatch_history_owners)
     delete_all_objects(:repatch_global_hooks)
     delete_all_objects(:repatch_shared_hooks)
     delete_all_objects(:repatch_shared_allowances)
@@ -376,12 +423,18 @@ defmodule Repatch do
       false
 
   If spy is called on the same module for more than one time, it will clear the history of calls.
+
+  With `enable_history: :owned` in `setup/1`, calls are recorded only for the process which
+  called `spy/2` (or patched the module), for processes which have it in their `$callers`
+  (like tasks), for processes allowed with `allow/3` and, when the module is patched in
+  `:global` mode, for every process, until `cleanup/1` of that process.
   """
   @spec spy(module(), [spy_option()]) :: :ok
   def spy(module, opts \\ []) do
     pid = Keyword.get(opts, :by, self())
     recompile(module, opts)
-    cleanup_history(pid)
+    clear_history(pid)
+    track_history(module, :local)
     :ok
   end
 
@@ -808,6 +861,7 @@ defmodule Repatch do
   @doc false
   def add_hook(module, function, arity, hook, opts) do
     mode = Keyword.get(opts, :mode, :local)
+    track_history(module, mode)
 
     case :ets.lookup(:repatch_state, {module, function, arity, self()}) do
       [] ->
@@ -1132,6 +1186,7 @@ defmodule Repatch do
 
   Works only when history is enabled in setup.
   Please make sure that module is spied on or at least patched before querying history on it.
+  With `enable_history: :owned`, see `spy/2` for which calls are recorded.
   """
   @spec called?(module(), atom(), arity() | [term()], [called_check_option()]) :: boolean()
   def called?(module, function, arity_or_args, opts \\ []) do
@@ -1229,6 +1284,7 @@ defmodule Repatch do
 
   Works only when history is enabled in setup.
   Please make sure that module is spied on or at least patched before querying history on it.
+  With `enable_history: :owned`, see `spy/2` for which calls are recorded.
   """
   @doc since: "1.6.0"
   defmacro called?(dotcall, opts \\ []) do
@@ -1335,6 +1391,7 @@ defmodule Repatch do
 
   Works only when history is enabled in setup.
   Please make sure that module is spied on or at least patched before querying history on it.
+  With `enable_history: :owned`, see `spy/2` for which calls are recorded.
   """
   @doc since: "1.6.0"
   @spec history([history_option()]) :: [
@@ -1365,26 +1422,28 @@ defmodule Repatch do
       end
 
     ms =
-      {{{module, function, arity, pid}, :"$4", args}, guard, [{{module, function, args, :"$4"}}]}
+      {{{module, function, arity, pid}, :"$4", args, :_}, guard,
+       [{{module, function, args, :"$4"}}]}
 
     :ets.select(:repatch_history, [ms])
   end
 
   @doc false
   def called_pattern(module, function, arity, pid, args, _index, nil, nil) do
-    {{{module, function, arity, pid}, :_, args}, [], [:"$$"]}
+    {{{module, function, arity, pid}, :_, args, :_}, [], [:"$$"]}
   end
 
   def called_pattern(module, function, arity, pid, args, index, nil, before) do
-    {{{module, function, arity, pid}, :"$#{index}", args}, [{:"=<", :"$1", before}], [:"$$"]}
+    {{{module, function, arity, pid}, :"$#{index}", args, :_}, [{:"=<", :"$1", before}], [:"$$"]}
   end
 
   def called_pattern(module, function, arity, pid, args, index, afterr, nil) do
-    {{{module, function, arity, pid}, :"$#{index}", args}, [{:>=, :"$#{index}", afterr}], [:"$$"]}
+    {{{module, function, arity, pid}, :"$#{index}", args, :_}, [{:>=, :"$#{index}", afterr}],
+     [:"$$"]}
   end
 
   def called_pattern(module, function, arity, pid, args, index, afterr, before) do
-    {{{module, function, arity, pid}, :"$#{index}", args},
+    {{{module, function, arity, pid}, :"$#{index}", args, :_},
      [{:>=, :"$#{index}", afterr}, {:"=<", :"$#{index}", before}], [:"$$"]}
   end
 
@@ -1493,9 +1552,7 @@ defmodule Repatch do
   @spec dispatch(module(), atom(), arity(), [term()]) :: :pass | {:ok, term()}
   def dispatch(module, function, arity, args) do
     if :persistent_term.get(:repatch_history_enabled, true) do
-      ts = :erlang.monotonic_time()
-      :ets.insert(:repatch_history, {{module, function, arity, self()}, ts, args})
-      # debug("Inserted history #{ts}")
+      record_history(module, function, arity, args)
     end
 
     case :erlang.get(:repatch_bypass_hooks) do
@@ -1512,6 +1569,87 @@ defmodule Repatch do
       true ->
         debug("Dispatched none")
         :pass
+    end
+  end
+
+  defp record_history(module, function, arity, args) do
+    owner =
+      with nil <- history_owner(module) do
+        # Nobody spied on or patched the module for this process
+        unless :persistent_term.get(:repatch_history_owned, false), do: root_caller()
+      end
+
+    if owner do
+      ts = :erlang.monotonic_time()
+      :ets.insert(:repatch_history, {{module, function, arity, self()}, ts, args, owner})
+      # debug("Inserted history #{ts}")
+    end
+  end
+
+  # The process which spied on or patched the module, for which this call is recorded:
+  # the caller itself, its allowance owner, one of its `$callers` or a global patch owner
+  defp history_owner(module) do
+    with nil <- history_owner(module, [self()]),
+         nil <- history_owner(module, allowance_owner()),
+         nil <- history_owner(module, callers()) do
+      global_history_owner(module)
+    end
+  end
+
+  defp history_owner(_module, []) do
+    nil
+  end
+
+  defp history_owner(module, [pid | tail]) do
+    if :ets.member(:repatch_history_owners, {module, pid}) do
+      pid
+    else
+      history_owner(module, tail)
+    end
+  end
+
+  defp allowance_owner do
+    if :persistent_term.get(:repatch_shared_hooks_enabled, true) do
+      case :ets.lookup(:repatch_shared_allowances, self()) do
+        [{_, pid}] when is_pid(pid) -> [pid]
+        _ -> []
+      end
+    else
+      []
+    end
+  end
+
+  defp callers do
+    case :erlang.get(:"$callers") do
+      [_ | _] = callers -> callers
+      _ -> []
+    end
+  end
+
+  # Whose `cleanup/1` removes a call recorded for nobody in particular: the allowance owner,
+  # or the first of the `$callers` (a test process), so that calls made by its tasks do not
+  # outlive it
+  defp root_caller do
+    case allowance_owner() do
+      [pid] -> pid
+      [] -> last_caller(callers(), self())
+    end
+  end
+
+  defp last_caller([], pid) do
+    pid
+  end
+
+  defp last_caller([pid | tail], _) do
+    last_caller(tail, pid)
+  end
+
+  defp global_history_owner(module) do
+    if :persistent_term.get(:repatch_global_hooks_enabled, false) do
+      case :ets.lookup(:repatch_history_owners, {module, :global}) do
+        [{_, pid}] -> pid
+        [] -> nil
+      end
     end
   end
 
